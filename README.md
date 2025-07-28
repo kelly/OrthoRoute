@@ -2,6 +2,8 @@
 
 # OrthoRoute: GPU-Accelerated PCB Autorouter
 
+<nbsp>
+
 ## Project Overview
 
 **OrthoRoute** is a GPU-accelerated PCB autorouter, designed for massively parallel routing of complex circuit boards. Unlike traditional CPU-based autorouters that process nets sequentially, OrthoRoute leverages thousands of CUDA cores to route nets simultaneously using modern GPU compute.
@@ -376,47 +378,11 @@ print(f"Grid dimensions: {grid.width}×{grid.height}×{grid.layers}")
 
 ### Running in KiCad
 
-#### Plugin Installation (Windows)
+#### Plugin Installation
+1. First install OrthoRoute and its dependencies as described above
+2. Install the plugin in your KiCad plugins directory:
 
-**Quick Installation (Recommended)**
-
-1. Right-click on `install_windows.ps1` and select "Run with PowerShell" or run PowerShell as Administrator and navigate to the OrthoRoute directory.
-
-2. Run the installation script:
-```powershell
-.\install_windows.ps1
-```
-
-The script will automatically:
-- Check for CUDA installation
-- Find your KiCad Python installation
-- Install all required dependencies
-- Set up the KiCad plugin
-
-**Manual Installation (Advanced Users)**
-If you prefer to install manually, follow these steps:
-
-1. First, locate KiCad's Python executable:
-```powershell
-# Usually found at:
-$KICAD_PYTHON="C:\Program Files\KiCad\9.0\bin\python.exe"
-```
-
-2. Install required dependencies in KiCad's Python:
-```powershell
-& $KICAD_PYTHON -m pip install --upgrade pip
-& $KICAD_PYTHON -m pip install cupy-cuda12x  # For CUDA 12.x
-& $KICAD_PYTHON -m pip install numpy scipy networkx
-```
-
-3. Install OrthoRoute in KiCad's Python environment:
-```powershell
-# Navigate to OrthoRoute directory first
-cd path\to\OrthoRoute
-& $KICAD_PYTHON -m pip install -e .
-```
-
-4. Install the plugin in your KiCad plugins directory:
+Windows:
 ```powershell
 $PLUGIN_DIR="$env:APPDATA\kicad\7.0\3rdparty\plugins\OrthoRoute"
 mkdir -p $PLUGIN_DIR
