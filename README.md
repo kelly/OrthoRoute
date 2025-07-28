@@ -1,7 +1,6 @@
 <img src="/Assets/icon200.png" width="200" align="right"/>
 
 # OrthoRoute: GPU-Accelerated PCB Autorouter
-
 **OrthoRoute** is a GPU-accelerated PCB autorouter, designed for massively parallel routing of complex circuit boards. Unlike traditional CPU-based autorouters that process nets sequentially, OrthoRoute leverages thousands of CUDA cores to route nets simultaneously using modern GPU compute.
 
 ## Project Overview
