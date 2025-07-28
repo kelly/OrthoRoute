@@ -671,7 +671,7 @@ def evaluate_route_quality(routes, design_rules):
 ## Development & Contributing
 
 ## Project Structure
-"""
+```
 OrthoRoute/
 ├── orthoroute/                    # Main package
 │   ├── __init__.py               # Package initialization
@@ -704,7 +704,7 @@ OrthoRoute/
 ├── requirements.txt               # Python dependencies
 ├── setup.py                      # Package installation
 └── orthoroute_cli.py             # Command-line interface
-"""
+```
 
 ### Development Setup
 ```bash
