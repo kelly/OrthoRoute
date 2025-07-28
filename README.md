@@ -11,7 +11,7 @@
 ## Technical Philosophy
 
 ### Core Principles
-1. **Portability First** - Zero compilation
+1. **Portability First** - Built on CuPy for zero compilation
 2. **Scalability** - Designed to handle 8K+ nets on modern GPUs
 3. **Memory Efficiency** - Tiled processing and compressed state management
 4. **Conflict Resolution** - Negotiated congestion as primary algorithm, not afterthought
@@ -374,10 +374,57 @@ print("OrthoRoute ready!")
 print(f"Grid dimensions: {grid.width}×{grid.height}×{grid.layers}")
 ```
 
-### KiCad Plugin Setup
-1. Copy `kicad_plugin/` to your KiCad plugins directory
-2. Restart KiCad and refresh plugins  
-3. Look for "OrthoRoute GPU Autorouter" in toolbar
+### Running in KiCad
+
+#### Plugin Installation
+1. First install OrthoRoute and its dependencies as described above
+2. Install the plugin in your KiCad plugins directory:
+
+Windows:
+```powershell
+$PLUGIN_DIR="$env:APPDATA\kicad\7.0\3rdparty\plugins\OrthoRoute"
+mkdir -p $PLUGIN_DIR
+cp -r kicad_plugin\* $PLUGIN_DIR
+```
+
+Linux:
+```bash
+PLUGIN_DIR="~/.local/share/kicad/7.0/3rdparty/plugins/OrthoRoute"
+mkdir -p $PLUGIN_DIR
+cp -r kicad_plugin/* $PLUGIN_DIR
+```
+
+macOS:
+```bash
+PLUGIN_DIR="~/Library/Application Support/kicad/7.0/3rdparty/plugins/OrthoRoute"
+mkdir -p "$PLUGIN_DIR"
+cp -r kicad_plugin/* "$PLUGIN_DIR"
+```
+
+#### Using OrthoRoute in KiCad
+1. Open your PCB in KiCad PCB Editor
+2. Go to **Tools > External Plugins > OrthoRoute GPU Autorouter**
+3. In the plugin dialog:
+   - Set your desired routing grid (default 0.1mm)
+   - Choose number of layers to route on
+   - Select nets to route (or use "Route All")
+   - Configure design rules (trace width, clearance)
+4. Click "Start Routing"
+5. Monitor progress in the status bar
+6. Review results - routed traces will be added to your board
+
+#### Tips for Best Results
+- Clear any existing routes first (**Tools > Global Delete > Tracks**)
+- Set board outline and keepout zones before routing
+- Place components with adequate spacing
+- Consider using routing regions to guide difficult areas
+- Start with larger grid sizes for faster results
+
+#### Troubleshooting
+- If the plugin doesn't appear, check KiCad's **Plugin and Content Manager**
+- Verify CUDA installation with `nvidia-smi` command
+- Check KiCad console for any Python errors
+- Try reducing batch size if you encounter memory errors
 
 ## Usage Examples
 
@@ -624,8 +671,7 @@ def evaluate_route_quality(routes, design_rules):
 ## Development & Contributing
 
 ## Project Structure
-
-project_structure = """
+"""
 OrthoRoute/
 ├── orthoroute/                    # Main package
 │   ├── __init__.py               # Package initialization
