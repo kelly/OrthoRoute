@@ -1,6 +1,10 @@
-<img src="/Assets/icon200.png" width="200" align="left"/>
+<div style="display: flex; align-items: start; gap: 2em; margin-bottom: 2em;">
+<img src="/Assets/icon200.png" width="200" style="margin: 0"/>
+<div>
 
-# OrthoRoute: GPU-Accelerated PCB Autorouter <nbsp><nbsp>
+# OrthoRoute: GPU-Accelerated PCB Autorouter
+</div>
+</div>
 
 
 **OrthoRoute** is a GPU-accelerated PCB autorouter, designed for massively parallel routing of complex circuit boards. Unlike traditional CPU-based autorouters that process nets sequentially, OrthoRoute leverages thousands of CUDA cores to route nets simultaneously using modern GPU compute.
