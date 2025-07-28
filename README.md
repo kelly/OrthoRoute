@@ -1,3 +1,5 @@
+![OrthoRoute icon](/Assets/icon200.png)
+
 # OrthoRoute: GPU-Accelerated PCB Autorouter
 
 ## Project Overview
