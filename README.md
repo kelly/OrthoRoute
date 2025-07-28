@@ -1,5 +1,7 @@
 <div style="display: flex; align-items: start; gap: 2em; margin-bottom: 2em;">
+<center>
 <img src="/Assets/icon200.png" width="200" style="margin: 0"/>
+</center>
 <div>
 
 <h1>OrthoRoute: GPU-Accelerated PCB Autorouter</h1>
