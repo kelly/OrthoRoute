@@ -4,7 +4,7 @@
 
 A high-performance GPU-accelerated PCB autorouter for KiCad using NVIDIA CUDA through CuPy.
 
-## 🚀 Features
+## Features
 
 - **GPU-Accelerated Routing**: Leverages NVIDIA CUDA for parallel wavefront routing algorithms
 - **Real-Time Visualization**: Optional progress display during routing operations
@@ -13,7 +13,7 @@ A high-performance GPU-accelerated PCB autorouter for KiCad using NVIDIA CUDA th
 - **KiCad Integration**: Native KiCad plugin with toolbar integration
 - **Fallback Mode**: CPU-only routing when GPU is unavailable
 
-## 📦 Installation
+## Installation
 
 ### Method 1: KiCad Plugin and Content Manager (Recommended)
 
@@ -33,7 +33,7 @@ A high-performance GPU-accelerated PCB autorouter for KiCad using NVIDIA CUDA th
    ```
 3. Restart KiCad
 
-## 🔧 Requirements
+## Requirements
 
 ### Hardware
 - NVIDIA GPU with CUDA support (for acceleration)
@@ -49,7 +49,7 @@ A high-performance GPU-accelerated PCB autorouter for KiCad using NVIDIA CUDA th
   pip install cupy-cuda11x  # For CUDA 11.x
   ```
 
-## 🎯 Usage
+## Usage
 
 1. Open a PCB design in KiCad
 2. Click the OrthoRoute icon in the toolbar or go to **Tools → OrthoRoute GPU Autorouter**
@@ -62,7 +62,7 @@ A high-performance GPU-accelerated PCB autorouter for KiCad using NVIDIA CUDA th
 4. Click **Start Routing**
 5. Review results and imported tracks
 
-## 🏗️ Project Structure
+## Project Structure
 
 ```
 OrthoRoute/
@@ -80,7 +80,7 @@ OrthoRoute/
 └── README.md                  # This file
 ```
 
-## 🔧 Development
+## Development
 
 ### Building the Addon Package
 
@@ -108,7 +108,7 @@ The addon follows KiCad's official packaging guidelines:
 - **Proper metadata**: Compatible with Plugin and Content Manager
 - **Standard structure**: Follows KiCad addon conventions
 
-## 🧪 Algorithm
+## Algorithm
 
 OrthoRoute uses GPU-accelerated algorithms:
 
@@ -118,7 +118,7 @@ OrthoRoute uses GPU-accelerated algorithms:
 4. **Path Optimization**: Via minimization and length optimization
 5. **Result Export**: Converts grid paths back to KiCad tracks
 
-## 📊 Performance
+## Performance
 
 Typical performance improvements over traditional routers:
 
@@ -128,7 +128,7 @@ Typical performance improvements over traditional routers:
 
 *Performance depends on GPU capability and board complexity*
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### Plugin Not Appearing
 - Restart KiCad completely
@@ -145,15 +145,30 @@ Typical performance improvements over traditional routers:
 - Use smaller grid pitch for large boards
 - Ensure sufficient GPU memory
 
-## 📄 License
+## License
 
-MIT License - see LICENSE file for details.
+```
+           DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
+                    MODIFIED FOR NERDS 
+                   Version 3, April 2025
 
-## 🤝 Contributing
+Everyone is permitted to copy and distribute verbatim or modified
+copies of this license document, and changing it is allowed as long
+as the name is changed.
+ 
+           DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
+  TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
+
+ 0. You just DO WHAT THE FUCK YOU WANT TO.
+
+ 1. Anyone who complains about this license is a nerd.
+```
+
+## Contributing
 
 Contributions welcome! Please read contributing guidelines and submit pull requests.
 
-## 📞 Support
+## Support
 
 - **Issues**: [GitHub Issues](https://github.com/bbenchoff/OrthoRoute/issues)
 - **Documentation**: [Wiki](https://github.com/bbenchoff/OrthoRoute/wiki)
