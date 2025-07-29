@@ -9,12 +9,9 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Any
 
 class OrthoRouteEngine:
-    def __init__(self, gpu_id: int = 0):
+    def __init__(self):
         """Initialize the GPU routing engine."""
-        # Initialize CUDA device
-        cp.cuda.Device(gpu_id).use()
-        
-        print(f"OrthoRoute GPU Engine initialized on device {gpu_id}")
+        print("OrthoRoute GPU Engine initialized on device 0")
         # Debug info with unique ID to track engine instances
         import random, time
         self.engine_id = f"engine_{int(time.time() % 10000)}_{random.randint(1000, 9999)}"
@@ -32,9 +29,7 @@ class OrthoRouteEngine:
             'conflict_penalty': 50,
             'max_wave_iterations': 1000,
             'grid_pitch_mm': 0.1,  # 100 micron grid pitch
-            'max_layers': 8,
-            'batch_size': 10,  # Number of nets to route simultaneously
-            'congestion_threshold': 3
+            'max_layers': 2  # Default number of layers
         }
         
     def enable_visualization(self, viz_config):
@@ -214,6 +209,32 @@ class ConflictResolver:
                 net.total_length = len(path)  # Simple length metric
         
         return nets
+
+class OrthoRouteEngine:
+    """Main GPU routing engine"""
+    
+    def __init__(self, gpu_id: int = 0):
+        # Initialize CUDA device
+        cp.cuda.Device(gpu_id).use()
+        
+        self.grid = None
+        self.config = {
+            'grid_pitch_mm': 0.1,  # 0.1mm grid
+            'max_layers': 8,
+            'max_iterations': 100,
+            'batch_size': 10,  # Number of nets to route simultaneously
+            'congestion_threshold': 3
+        }
+        
+        print(f"OrthoRoute GPU Engine initialized on device {gpu_id}")
+        self._print_gpu_info()
+    
+    def _print_gpu_info(self):
+        """Print GPU information"""
+        device = cp.cuda.Device()
+        print(f"\nGPU Information:")
+        print(f"Device ID: {device.id}")
+        print(f"Global Memory: {device.mem_info[1] / (1024**3):.1f} GB")
     
     def load_board_data(self, board_data: Dict) -> bool:
         """Load board data and initialize grid"""
@@ -298,45 +319,32 @@ class ConflictResolver:
         
         # Initialize wave router - handle multiple import strategies
         try:
-            # Try importing from the standalone version first (no circular imports)
-            from orthoroute.standalone_wave_router import WaveRouter
-            print("DEBUG: Imported WaveRouter from standalone module")
+            # Try importing from the installed package first
+            from orthoroute.wave_router import WaveRouter
+            print("DEBUG: Imported WaveRouter from installed package")
         except ImportError:
             try:
-                # Try relative import of standalone version
-                from .standalone_wave_router import WaveRouter
-                print("DEBUG: Imported WaveRouter using relative import (standalone)")
+                # Try relative import
+                from .wave_router import WaveRouter
+                print("DEBUG: Imported WaveRouter using relative import")
             except ImportError:
                 try:
-                    # Try absolute import of standalone version
-                    from standalone_wave_router import WaveRouter
-                    print("DEBUG: Imported WaveRouter using absolute import (standalone)")
+                    # Try absolute import
+                    from wave_router import WaveRouter
+                    print("DEBUG: Imported WaveRouter using absolute import")
                 except ImportError:
-                    try:
-                        # Try original wave router imports
-                        from orthoroute.wave_router import WaveRouter
-                        print("DEBUG: Imported WaveRouter from original module")
-                    except ImportError:
-                        try:
-                            from .wave_router import WaveRouter
-                            print("DEBUG: Imported WaveRouter using relative import (original)")
-                        except ImportError:
-                            try:
-                                from wave_router import WaveRouter
-                                print("DEBUG: Imported WaveRouter using absolute import (original)")
-                            except ImportError:
-                                # Fallback - create a simple mock router for testing
-                                print("Warning: WaveRouter not found, using mock router")
-                                class MockWaveRouter:
-                                    def __init__(self, grid):
-                                        self.grid = grid
-                                    def route_net(self, net):
-                                        # Simple mock - just mark as successfully routed
-                                        net.routed = True
-                                        net.success = True
-                                        net.route_path = net.pins  # Simple path - just the pins
-                                        return True
-                                WaveRouter = MockWaveRouter
+                    # Fallback - create a simple mock router for testing
+                    print("Warning: WaveRouter not found, using mock router")
+                    class MockWaveRouter:
+                        def __init__(self, grid):
+                            self.grid = grid
+                        def route_net(self, net):
+                            # Simple mock - just mark as successfully routed
+                            net.routed = True
+                            net.success = True
+                            net.route_path = net.pins  # Simple path - just the pins
+                            return True
+                    WaveRouter = MockWaveRouter
         
         router = WaveRouter(self.grid)
         

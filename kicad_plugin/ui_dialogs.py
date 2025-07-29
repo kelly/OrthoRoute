@@ -19,13 +19,24 @@ try:
     from dataclasses import dataclass
     from enum import Enum
     
-    # Debug info at module level
+    # Debug info at module level - commented out to prevent import errors
+    # _debug_info = f"ui_dialogs.py loaded from {__file__}\nPython path: {sys.path}"
+    # wx.MessageBox(_debug_info, "UI Dialogs Debug", wx.OK)
+    
+    # Log debug info safely (handle KiCad's None stderr)
     _debug_info = f"ui_dialogs.py loaded from {__file__}\nPython path: {sys.path}"
-    wx.MessageBox(_debug_info, "UI Dialogs Debug", wx.OK)
+    import sys
+    if sys.stderr is not None:
+        sys.stderr.write(f"DEBUG: {_debug_info}\n")
+    else:
+        print(f"DEBUG: {_debug_info}")
 except Exception as e:
     import sys
-    sys.stderr.write(f"Error loading ui_dialogs.py: {str(e)}\n")
-    raise
+    if sys.stderr is not None:
+        sys.stderr.write(f"Error loading ui_dialogs.py: {str(e)}\n")
+    else:
+        print(f"Error loading ui_dialogs.py: {str(e)}")
+    # Don't raise the exception, just continue loading
 
 # Custom events for threading communication
 UpdateProgressEvent, EVT_UPDATE_PROGRESS = wx.lib.newevent.NewEvent()
@@ -216,15 +227,15 @@ class OrthoRouteConfigDialog(wx.Dialog):
         algo_grid.Add(self.congestion_ctrl, 1, wx.EXPAND)
         
         algo_grid.Add(wx.StaticText(panel, label="Via Cost:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.via_cost_ctrl = wx.SpinCtrl(panel, value=10, min=1, max=100)
+        self.via_cost_ctrl = wx.SpinCtrl(panel, -1, "10", min=1, max=100)
         algo_grid.Add(self.via_cost_ctrl, 1, wx.EXPAND)
         
         algo_grid.Add(wx.StaticText(panel, label="Direction Change Cost:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.direction_cost_ctrl = wx.SpinCtrl(panel, value=2, min=0, max=10)
+        self.direction_cost_ctrl = wx.SpinCtrl(panel, -1, "2", min=0, max=10)
         algo_grid.Add(self.direction_cost_ctrl, 1, wx.EXPAND)
         
         algo_grid.Add(wx.StaticText(panel, label="Trace Cost:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.trace_cost_ctrl = wx.SpinCtrl(panel, value=1, min=1, max=10)
+        self.trace_cost_ctrl = wx.SpinCtrl(panel, -1, "1", min=1, max=10)
         algo_grid.Add(self.trace_cost_ctrl, 1, wx.EXPAND)
         
         algo_sizer.Add(algo_grid, 0, wx.EXPAND | wx.ALL, 5)
@@ -299,11 +310,11 @@ class OrthoRouteConfigDialog(wx.Dialog):
         # Pin count limits
         pin_sizer = wx.FlexGridSizer(2, 2, 5, 10)
         pin_sizer.Add(wx.StaticText(panel, label="Minimum pins per net:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.min_pins_ctrl = wx.SpinCtrl(panel, value=2, min=2, max=100)
+        self.min_pins_ctrl = wx.SpinCtrl(panel, -1, "2", min=2, max=100)
         pin_sizer.Add(self.min_pins_ctrl, 1, wx.EXPAND)
         
         pin_sizer.Add(wx.StaticText(panel, label="Maximum pins per net:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.max_pins_ctrl = wx.SpinCtrl(panel, value=100, min=2, max=1000)
+        self.max_pins_ctrl = wx.SpinCtrl(panel, -1, "100", min=2, max=1000)
         pin_sizer.Add(self.max_pins_ctrl, 1, wx.EXPAND)
         
         selection_sizer.Add(pin_sizer, 0, wx.EXPAND | wx.ALL, 5)

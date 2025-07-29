@@ -5,9 +5,23 @@ import json
 import tempfile
 import os
 from typing import Dict, List
-import ui_dialogs
-import board_export
-import route_import
+
+# Import modules from the same directory with error handling
+try:
+    from . import ui_dialogs
+except ImportError:
+    import ui_dialogs
+
+try:
+    from . import board_export
+except ImportError:
+    import board_export
+
+try:
+    from . import route_import
+except ImportError:
+    import route_import
+
 # Import moved inside _route_board_gpu to avoid import errors if CuPy not available
 
 OrthoRouteConfigDialog = ui_dialogs.OrthoRouteConfigDialog
@@ -19,8 +33,8 @@ class OrthoRouteKiCadPlugin(pcbnew.ActionPlugin):
     
     def defaults(self):
         self.name = "OrthoRoute GPU Autorouter"
-        self.category = "Autorouter"
-        self.description = "GPU-accelerated PCB autorouter using CuPy"
+        self.category = "Routing"
+        self.description = "GPU-accelerated PCB autorouter using CuPy/CUDA"
         self.show_toolbar_button = True
         self.icon_file_name = os.path.join(os.path.dirname(__file__), "icon.png")
     
