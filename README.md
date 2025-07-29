@@ -6,14 +6,14 @@ A high-performance GPU-accelerated PCB autorouter for KiCad using NVIDIA CUDA th
 
 ## Features
 
-- **🚀 GPU-Accelerated Routing**: Leverages NVIDIA CUDA through CuPy for parallel Lee's algorithm implementation
-- **📊 Real-Time Visualization**: Optional progress display during routing operations
-- **🔄 Multi-Layer Support**: Full support for complex multi-layer PCB designs with via optimization
-- **⚙️ Configurable Parameters**: Customizable grid pitch, iteration limits, via costs, and batch processing
-- **🔌 Native KiCad Integration**: Seamless integration as a KiCad addon with toolbar access
-- **💻 Intelligent Fallback**: Automatic CPU-only routing when GPU is unavailable
-- **📦 Self-Contained**: No external dependencies required in KiCad environment
-- **🎯 Lee's Algorithm**: Industry-standard wavefront routing with GPU parallelization
+- **GPU-Accelerated Routing**: Leverages NVIDIA CUDA through CuPy for parallel Lee's algorithm implementation
+- **Real-Time Visualization**: Optional progress display during routing operations
+- **Multi-Layer Support**: Full support for complex multi-layer PCB designs with via optimization
+- **Configurable Parameters**: Customizable grid pitch, iteration limits, via costs, and batch processing
+- **Native KiCad Integration**: Seamless integration as a KiCad addon with toolbar access
+- **Intelligent Fallback**: Automatic CPU-only routing when GPU is unavailable
+- **Self-Contained**: No external dependencies required in KiCad environment
+- **Lee's Algorithm**: Industry-standard wavefront routing with GPU parallelization
 
 ## Installation
 
@@ -110,36 +110,44 @@ python -c "import cupy as cp; print(f'GPU: {cp.cuda.Device().name}')"
 
 ```
 OrthoRoute/
-├── addon_package/                    # 📦 KiCad addon package
-│   ├── metadata.json                # Package metadata for KiCad
+├── addon_package/                    # 📦 KiCad addon package (MAIN)
+│   ├── metadata.json                # Package metadata for KiCad PCM
 │   ├── plugins/                     # Plugin implementation
-│   │   ├── __init__.py              # Main plugin entry point
+│   │   ├── __init__.py              # Main plugin entry point with UI
 │   │   ├── orthoroute_engine.py     # 🚀 Standalone GPU routing engine
 │   │   └── icon.png                 # Toolbar icon (24x24)
 │   ├── resources/                   # Package resources
 │   │   └── icon.png                 # Package manager icon (64x64)
 │   └── README.md                    # Package documentation
-├── orthoroute/                      # 🔧 Core routing modules
-│   ├── gpu_engine.py               # GPU acceleration backend
-│   ├── wave_router.py              # Lee's algorithm implementation
-│   ├── grid_manager.py             # Routing grid management
-│   ├── visualization.py            # Real-time progress display
-│   └── standalone_wave_router.py   # CPU fallback router
-├── kicad_plugin/                    # 🔌 KiCad integration
-│   ├── orthoroute_kicad.py         # Main plugin interface
-│   ├── ui_dialogs.py               # Configuration dialogs
-│   ├── board_export.py             # Board data extraction
-│   └── plugin.py                   # Plugin registration
 ├── tests/                           # 🧪 Test suite
-│   ├── test_gpu_engine_mock.py     # GPU engine testing
-│   ├── integration_tests.py        # End-to-end tests
-│   └── verify_plugin.py           # Plugin verification
+│   ├── conftest.py                  # Test configuration
+│   ├── integration_tests.py         # End-to-end tests
+│   ├── test_gpu_engine_mock.py      # GPU engine testing
+│   ├── test_plugin_data.py          # Plugin data validation
+│   ├── test_plugin_registration.py  # Plugin registration tests
+│   ├── test_utils.py                # Testing utilities
+│   └── verify_plugin.py             # Plugin verification
 ├── Assets/                          # 🎨 Icons and graphics
-├── docs/                           # 📚 Documentation
-├── build_addon.py                  # 🔨 Addon package builder
-├── install_dev.py                  # 🛠️ Development installer
-└── README.md                       # This file
+│   ├── BigIcon.png                  # Large project icon
+│   ├── icon200.png                  # Medium icon (README)
+│   ├── icon64.png                   # Small icon
+│   └── icon24.png                   # Tiny icon
+├── build_addon.py                   # 🔨 Addon package builder
+├── install_dev.py                   # 🛠️ Development installer
+├── verify_plugin.py                 # Standalone plugin verification
+├── test_board.json                  # Test board data
+├── orthoroute-kicad-addon.zip       # 📦 Built addon package
+├── INSTALL.md                       # Installation instructions
+└── README.md                        # This file
 ```
+
+### Key Components
+
+- **`addon_package/`**: Complete self-contained KiCad plugin
+- **`orthoroute_engine.py`**: Standalone GPU routing engine with CuPy fallback
+- **`build_addon.py`**: Creates distributable zip package
+- **`install_dev.py`**: Quick development installation script
+- **`tests/`**: Comprehensive test suite for validation
 
 ## Algorithm Details
 
@@ -398,7 +406,7 @@ as the name is changed.
  1. Anyone who complains about this license is a nerd.
 ```
 
-*This is a humorous but legally valid license. The project is essentially public domain.*
+*This is a legally valid license. No I will not change it; that is an imposition on the author, who gave you shit for free. Who are you to ask for anything more? Stallman did more to kill Open Source than Bill Gates. Nerd.*
 
 ## Acknowledgments
 
