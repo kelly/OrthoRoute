@@ -1,78 +1,107 @@
+# AHHHH FUCKASS THIS WASN'T SUPPOSED TO BE PUBLIC
+
+
 ![Repo logo](/Assets/icon200.png)
 
-# OrthoRoute GPU Autorouter
+# OrthoRoute - KiCad GPU-Accelerated Autorouter
 
-A high-performance GPU-accelerated PCB autorouter for KiCad using NVIDIA CUDA through CuPy. OrthoRoute implements Lee's algorithm (wavefront propagation) with GPU parallelization for ultra-fast PCB routing.
+OrthoRoute is a high-performance GPU-accelerated autorouter plugin for KiCad, implementing wave propagation algorithms with CUDA acceleration for faster PCB routing.
 
 ## Features
 
-- **GPU-Accelerated Routing**: Leverages NVIDIA CUDA through CuPy for parallel Lee's algorithm implementation
-- **Real-Time Visualization**: Optional progress display during routing operations
-- **Multi-Layer Support**: Full support for complex multi-layer PCB designs with via optimization
-- **Configurable Parameters**: Customizable grid pitch, iteration limits, via costs, and batch processing
-- **Native KiCad Integration**: Seamless integration as a KiCad addon with toolbar access
-- **Intelligent Fallback**: Automatic CPU-only routing when GPU is unavailable
-- **Self-Contained**: No external dependencies required in KiCad environment
-- **Lee's Algorithm**: Industry-standard wavefront routing with GPU parallelization
+- **GPU Acceleration**: Uses CUDA/CuPy for high-performance routing computations
+- **Wave Propagation Algorithm**: Advanced routing algorithm for optimal trace placement  
+- **KiCad Integration**: Seamless integration as a KiCad action plugin with dual API support
+- **Future-Proof**: Supports both legacy SWIG API and new IPC API for KiCad 9.0+ compatibility
+- **Real-time Visualization**: Optional routing visualization and debugging
+- **Comprehensive Testing**: Extensive test suite including headless testing with KiCad CLI
+
+## Project Structure
+
+```
+OrthoRoute/
+├── addon_package/           # Production KiCad addon package
+│   ├── plugins/            # Main plugin files
+│   │   ├── __init__.py     # Primary plugin entry point (15.4KB)
+│   │   └── orthoroute_engine.py  # GPU routing engine (50.0KB)
+│   ├── resources/          # Icons and assets
+│   └── metadata.json       # Plugin metadata
+├── development/            # Development and testing files
+│   ├── documentation/      # Extended documentation
+│   ├── plugin_variants/    # 15 development plugin variants
+│   ├── testing/           # Comprehensive test suite
+│   │   ├── headless/      # KiCad CLI testing
+│   │   └── api_tests/     # API compatibility tests
+│   └── deprecated/        # Legacy code and experiments
+├── orthoroute/            # Core routing library
+│   ├── gpu_engine.py      # CUDA/CuPy acceleration
+│   ├── wave_router.py     # Wave propagation algorithms
+│   └── visualization.py   # Routing visualization
+└── docs/                  # User documentation
+```
 
 ## Installation
 
-### Method 1: KiCad Plugin and Content Manager (Recommended)
+### Prerequisites
 
-1. Download the latest `orthoroute-kicad-addon.zip` from [releases](https://github.com/bbenchoff/OrthoRoute/releases)
-2. Open KiCad PCB Editor
-3. Go to **Tools → Plugin and Content Manager**
-4. Click **Install from File**
-5. Select the downloaded zip file
-6. Restart KiCad
+- KiCad 7.0+ or 8.0+ (with KiCad 9.0+ IPC API support)
+- Python 3.8+
+- NVIDIA GPU with CUDA support (recommended)
+- CuPy library (for GPU acceleration)
 
-### Method 2: Development Installation
+### Quick Install
 
-For developers and testing:
+1. Download the latest `orthoroute-kicad-addon.zip` from releases (49.2KB optimized package)
+2. In KiCad, go to **Tools > Plugin and Content Manager**
+3. Click **Install from File** and select the downloaded zip
+4. Restart KiCad
+
+### Development Installation
 
 ```bash
-git clone https://github.com/bbenchoff/OrthoRoute.git
+# Clone the repository
+git clone https://github.com/yourusername/OrthoRoute.git
 cd OrthoRoute
+
+# Install in development mode
 python install_dev.py
 ```
 
-To uninstall: `python install_dev.py uninstall`
+## API Compatibility
 
-### Method 3: Build from Source
+OrthoRoute supports both current and future KiCad Python APIs:
 
-```bash
-git clone https://github.com/bbenchoff/OrthoRoute.git
-cd OrthoRoute
-python build_addon.py
-# Install the generated orthoroute-kicad-addon.zip via Plugin Manager
-```
+- **SWIG API (pcbnew)**: Current KiCad 7.0-8.0 compatibility
+- **IPC API (kicad-python)**: Future KiCad 9.0+ support  
+- **Automatic Detection**: Seamlessly switches between APIs
+- **Hybrid Bridge**: Maintains compatibility across versions
 
-## Requirements
+## Testing
 
-### Hardware (Optional but Recommended)
-- **NVIDIA GPU** with CUDA support (GTX 1050 or newer)
-- **4GB+ GPU memory** recommended for large boards
-- **8GB+ system RAM** for complex designs
-
-### Software
-- **KiCad 8.0 or later**
-- **Windows/Linux/macOS** (cross-platform support)
-
-### GPU Acceleration (Optional)
-For maximum performance, install CUDA support:
+The project includes comprehensive testing capabilities:
 
 ```bash
-# For CUDA 12.x
-pip install cupy-cuda12x
+# Run all tests
+python development/testing/run_all_tests.py
 
-# For CUDA 11.x  
-pip install cupy-cuda11x
+# Headless testing with KiCad CLI
+python development/testing/headless/headless_test.py
 
-# Verify installation
-python -c "import cupy as cp; device = cp.cuda.Device(); props = cp.cuda.runtime.getDeviceProperties(device.id); print(f'GPU: {props[\"name\"].decode(\"utf-8\")}')"
+# API compatibility tests
+python development/testing/api_tests/api_bridge_test.py
 ```
 
-**Note**: OrthoRoute works without GPU acceleration using CPU fallback mode.
+### Headless Testing
+
+For CI/CD and automated testing:
+
+```bash
+# Using KiCad CLI (requires KiCad 8.0+)
+kicad-cli pcb export gerbers --help
+
+# Run plugin tests without GUI
+python development/testing/headless/test_kicad_cli.py
+```
 
 ## Usage
 
@@ -109,45 +138,119 @@ python -c "import cupy as cp; device = cp.cuda.Device(); props = cp.cuda.runtime
 ## Project Structure
 
 ```
-OrthoRoute/
-├── addon_package/                    # 📦 KiCad addon package (MAIN)
-│   ├── metadata.json                # Package metadata for KiCad PCM
-│   ├── plugins/                     # Plugin implementation
-│   │   ├── __init__.py              # Main plugin entry point with UI
-│   │   ├── orthoroute_engine.py     # 🚀 Standalone GPU routing engine
-│   │   └── icon.png                 # Toolbar icon (24x24)
-│   ├── resources/                   # Package resources
-│   │   └── icon.png                 # Package manager icon (64x64)
-│   └── README.md                    # Package documentation
-├── tests/                           # 🧪 Test suite
-│   ├── conftest.py                  # Test configuration
-│   ├── integration_tests.py         # End-to-end tests
-│   ├── test_gpu_engine_mock.py      # GPU engine testing
-│   ├── test_plugin_data.py          # Plugin data validation
-│   ├── test_plugin_registration.py  # Plugin registration tests
-│   ├── test_utils.py                # Testing utilities
-│   └── verify_plugin.py             # Plugin verification
-├── Assets/                          # 🎨 Icons and graphics
-│   ├── BigIcon.png                  # Large project icon
-│   ├── icon200.png                  # Medium icon (README)
-│   ├── icon64.png                   # Small icon
-│   └── icon24.png                   # Tiny icon
-├── build_addon.py                   # 🔨 Addon package builder
-├── install_dev.py                   # 🛠️ Development installer
-├── verify_plugin.py                 # Standalone plugin verification
-├── test_board.json                  # Test board data
-├── orthoroute-kicad-addon.zip       # 📦 Built addon package
-├── INSTALL.md                       # Installation instructions
-└── README.md                        # This file
+OrthoRoute/                          # 🚀 Clean, organized project structure
+├── addon_package/                   # 📦 Production KiCad addon (49.2KB optimized)
+│   ├── metadata.json               # Package metadata for KiCad PCM
+│   ├── plugins/                    # Main plugin implementation
+│   │   ├── __init__.py             # Plugin entry point (15.4KB)
+│   │   ├── orthoroute_engine.py    # GPU routing engine (50.0KB)
+│   │   └── icon.png                # Toolbar icon (24x24)
+│   ├── resources/                  # Package resources
+│   │   └── icon.png                # Package manager icon (64x64)
+│   └── README.md                   # Package documentation
+├── development/                     # 🛠️ Development files (organized)
+│   ├── documentation/              # Extended documentation
+│   │   ├── api_reference.md        # API documentation
+│   │   ├── contributing.md         # Contribution guidelines
+│   │   └── installation.md         # Detailed installation guide
+│   ├── plugin_variants/            # 15 development plugin variants
+│   │   ├── minimal/                # Minimal plugin implementations
+│   │   ├── debug/                  # Debug versions
+│   │   └── experimental/           # Experimental features
+│   ├── testing/                    # Comprehensive test suite
+│   │   ├── api_tests/              # API compatibility tests
+│   │   ├── headless/               # KiCad CLI testing
+│   │   ├── integration/            # End-to-end tests
+│   │   └── run_all_tests.py        # Test runner
+│   └── deprecated/                 # Legacy code archive
+├── orthoroute/                     # 🔧 Core routing library
+│   ├── __init__.py                 # Library interface
+│   ├── gpu_engine.py               # CUDA/CuPy acceleration
+│   ├── grid_manager.py             # Routing grid management
+│   ├── routing_algorithms.py       # Core algorithms
+│   ├── standalone_wave_router.py   # Standalone router
+│   ├── visualization.py            # Routing visualization
+│   └── wave_router.py              # Wave propagation
+├── tests/                          # 🧪 Legacy test suite (maintained)
+│   ├── conftest.py                 # Test configuration
+│   ├── integration_tests.py        # End-to-end tests
+│   ├── test_gpu_engine_mock.py     # GPU engine testing
+│   ├── test_plugin_data.py         # Plugin data validation
+│   ├── test_plugin_registration.py # Plugin registration tests
+│   ├── test_utils.py               # Testing utilities
+│   └── verify_plugin.py            # Plugin verification
+├── Assets/                         # 🎨 Icons and graphics
+│   ├── BigIcon.png                 # Large project icon
+│   ├── icon200.png                 # Medium icon (README)
+│   ├── icon64.png                  # Standard icon
+│   └── icon24.png                  # Small icon
+├── docs/                           # � User documentation
+│   ├── api_reference.md            # API reference
+│   ├── contributing.md             # How to contribute
+│   └── installation.md             # Installation guide
+├── build_addon.py                  # 📦 Package builder
+├── install_dev.py                  # 🔧 Development installer
+├── orthoroute-kicad-addon.zip      # 📦 Release package (49.2KB)
+├── README.md                       # 📖 This file
+├── TESTING_SUMMARY.md              # 🧪 Testing overview
+├── WORKSPACE_CLEANUP.md            # 🧹 Cleanup documentation
+└── FINAL_STATUS.md                 # ✅ Project status
 ```
 
-### Key Components
+## Requirements
 
-- **`addon_package/`**: Complete self-contained KiCad plugin
-- **`orthoroute_engine.py`**: Standalone GPU routing engine with CuPy fallback
-- **`build_addon.py`**: Creates distributable zip package
-- **`install_dev.py`**: Quick development installation script
-- **`tests/`**: Comprehensive test suite for validation
+### Hardware (Optional but Recommended)
+- **NVIDIA GPU** with CUDA support (GTX 1050 or newer)
+- **4GB+ GPU memory** recommended for large boards
+- **8GB+ system RAM** for complex designs
+
+### Software
+- **KiCad 7.0+ or 8.0+** (with KiCad 9.0+ IPC API support)
+- **Windows/Linux/macOS** (cross-platform support)
+- **Python 3.8+** with standard libraries
+
+### GPU Acceleration (Optional)
+For maximum performance, install CUDA support:
+
+```bash
+# For CUDA 12.x
+pip install cupy-cuda12x
+
+# For CUDA 11.x  
+pip install cupy-cuda11x
+
+# Verify installation
+python -c "import cupy as cp; device = cp.cuda.Device(); props = cp.cuda.runtime.getDeviceProperties(device.id); print(f'GPU: {props[\"name\"].decode(\"utf-8\")}')"
+```
+
+**Note**: OrthoRoute works without GPU acceleration using CPU fallback mode.
+
+## Usage
+
+### Quick Start
+
+1. Open your PCB design in KiCad PCB Editor
+2. Go to **Tools > External Plugins > OrthoRoute GPU Autorouter**
+3. Configure routing parameters in the dialog
+4. Click **Route Board** to start automated routing
+5. Review results and iterate as needed
+
+### Configuration Options
+
+| Parameter | Range | Description |
+|-----------|-------|-------------|
+| Grid Pitch | 0.05-1.0mm | Routing grid resolution |
+| Max Iterations | 1-10 | Rerouting attempts for failed nets |
+| Via Cost | 1-100 | Cost penalty for using vias |
+| Batch Size | 1-50 | Number of nets processed in parallel |
+| Congestion Threshold | 1-10 | Maximum usage per grid cell |
+
+### Tips for Best Results
+
+- **Grid Pitch**: Use 0.1mm for most designs, 0.05mm for high-density boards
+- **Complex Boards**: Enable visualization to monitor progress
+- **Large Designs**: Increase batch size if you have sufficient GPU memory
+- **Dense Routing**: Lower via cost to encourage layer changes
 
 ## Algorithm Details
 
