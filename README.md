@@ -199,7 +199,7 @@ Real-world performance improvements over traditional autorouters:
 
 ## Development
 
-### Recent Debugging Progress (July 2025)
+## Recent Development Progress (July 2025)
 
 **Issue**: OrthoRoute plugin "doesn't actually route" - executes without errors but creates no tracks
 
@@ -214,17 +214,25 @@ Real-world performance improvements over traditional autorouters:
 - Plugin's net detection used object comparison (`pad.GetNet() == kicad_net`) instead of netcode comparison
 - Fixed to use `pad_net.GetNetCode() == netcode` for proper net-pad relationship detection
 
+**IPC API Transition Support Added**:
+- ✅ **Hybrid API Support**: Compatible with both SWIG (deprecated) and IPC APIs
+- ✅ **API Bridge**: Automatic detection and fallback between APIs
+- ✅ **Future-Proof**: Ready for KiCad 10.0 transition (SWIG removal in Feb 2026)
+- ✅ **Testing Tools**: Comprehensive IPC vs SWIG API comparison tests
+
 **Current Status**: 
 - ✅ Plugin loads and runs without crashes
 - ✅ UI compatibility fixed for KiCad 8.0+
 - ✅ Track creation functionality implemented
 - ✅ Net-pad matching logic corrected
+- ✅ IPC API transition support added
 - 🔄 **Next**: Debug why nets still show as 0 after fixes applied
 
 **Testing Approach**:
 - Created comprehensive KiCad API investigation tools
 - Systematic debugging through each stage of the routing pipeline
 - Progressive fixes applied and packaged for testing
+- Added IPC API compatibility layer for future KiCad versions
 
 ### Building the Addon Package
 
@@ -267,6 +275,22 @@ python tests/verify_plugin.py
 # Integration tests
 python tests/integration_tests.py
 ```
+
+### Test in Actual KiCad
+
+After installation, test the plugin in actual KiCad:
+
+1. **Open KiCad PCB Editor** with a board that has unrouted nets
+2. **Load the API test plugin**: Copy `simple_api_test_plugin.py` to test basic functionality
+3. **Run the test**: Tools → External Plugins → "KiCad API Test"
+4. **Check console output** for detailed diagnostic information
+5. **Test OrthoRoute**: Tools → External Plugins → "OrthoRoute GPU Autorouter"
+
+**Expected Results:**
+- Plugin loads without errors
+- Detects board dimensions and nets correctly  
+- Reports routing capabilities and system status
+- GPU acceleration available (if CUDA GPU present)
 
 ## Troubleshooting
 
@@ -320,6 +344,34 @@ investigate_board_api()
 - ✅ **Expected**: Plugin detects nets with 2+ pads and routes connections
 - ❌ **Actual**: Plugin runs but finds 0 nets, no routing occurs
 - 🔧 **Status**: Net detection logic fixed in latest version
+
+#### 🚀 KiCad IPC API Transition Support
+**Symptoms**: Warnings about SWIG API deprecation or IPC API requirements
+
+**Background**: KiCad is transitioning from SWIG-based Python bindings to IPC API
+- **SWIG API**: `import pcbnew` (deprecated in KiCad 9.0, removed in 10.0)
+- **IPC API**: `from kicad.pcbnew import Board` (future-proof)
+
+**OrthoRoute IPC Support**:
+```bash
+# Install IPC API support
+pip install kicad-python
+
+# Test API compatibility
+# Use "KiCad IPC API Test" plugin from Tools → External Plugins
+```
+
+**Benefits of IPC API**:
+- Future-proof (survives KiCad 10.0 transition)
+- More pythonic interface
+- Better error handling
+- Cleaner abstractions
+
+**Migration Status**:
+- ✅ **Hybrid Support**: OrthoRoute works with both SWIG and IPC APIs
+- ✅ **Automatic Detection**: Uses best available API
+- ✅ **Seamless Fallback**: No user configuration needed
+- 📅 **Timeline**: Ready for KiCad 10.0 (February 2026)
 
 #### 🐍 CuPy/CUDA Issues
 ```bash

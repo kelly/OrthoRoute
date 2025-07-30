@@ -18,6 +18,13 @@ var/
 wheels/
 *.egg-info/
 .installed.cfg
+
+# Development and testing temporary files
+development/testing/comprehensive_test_results.json
+development/testing/headless_test_results.json
+development/testing/simple_kicad_test.py
+development/testing/test_pcbnew_import.py
+development/testing/test_orthoroute_imports.py
 *.egg
 
 # Virtual Environment
