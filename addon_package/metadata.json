@@ -5,6 +5,7 @@
     "description_full": "OrthoRoute is a high-performance GPU-accelerated PCB autorouter that leverages NVIDIA CUDA through CuPy for parallel routing algorithms. Features include:\n\n• GPU-accelerated wavefront routing with conflict resolution\n• Real-time visualization of routing progress\n• Support for multi-layer boards\n• Configurable grid pitch and routing parameters\n• Batch processing for improved performance\n• Compatible with complex PCB designs\n\nRequirements:\n• NVIDIA GPU with CUDA support\n• CUDA Toolkit 11.8+ or 12.x\n• CuPy package (install with: pip install cupy-cuda12x)",
     "identifier": "com.github.bbenchoff.orthoroute",
     "type": "plugin",
+    "version": "1.0.0",
     "author": {
         "name": "Brian Benchoff",
         "contact": {

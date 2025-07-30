@@ -359,41 +359,75 @@ class GPUWavefrontRouter:
             return None
     
     def _route_net_cpu(self, net: Net) -> bool:
-        """CPU fallback routing (simple L-shaped paths)"""
-        print(f"Using CPU fallback for net {net.id}")
+        """CPU fallback routing (simple L-shaped paths) - ENHANCED DEBUG VERSION"""
+        print(f"🔧 Using CPU fallback for net {net.id} ({net.name})")
+        print(f"   Pins: {len(net.pins)}")
+        for i, pin in enumerate(net.pins):
+            print(f"     Pin {i+1}: ({pin.x}, {pin.y}, layer {pin.z})")
         
         # Simple L-shaped routing as fallback
         path = []
-        path.append(net.pins[0])
+        
+        # Start from the first pin
+        start_pin = net.pins[0]
+        path.append(start_pin)
+        print(f"   Starting at pin: ({start_pin.x}, {start_pin.y}, layer {start_pin.z})")
         
         for i in range(len(net.pins) - 1):
             start = net.pins[i]
             end = net.pins[i + 1]
+            print(f"   Routing from pin {i+1} to pin {i+2}")
+            print(f"     From: ({start.x}, {start.y}, layer {start.z})")
+            print(f"     To: ({end.x}, {end.y}, layer {end.z})")
             
             current = start
             
-            # Move in X direction
+            # Move in X direction first
+            x_steps = 0
             while current.x != end.x:
                 step_x = 1 if end.x > current.x else -1
                 current = Point3D(current.x + step_x, current.y, current.z)
                 path.append(current)
+                x_steps += 1
+                if x_steps > 1000:  # Safety break
+                    print(f"⚠️ Too many X steps, breaking")
+                    break
             
             # Move in Y direction  
+            y_steps = 0
             while current.y != end.y:
                 step_y = 1 if end.y > current.y else -1
                 current = Point3D(current.x, current.y + step_y, current.z)
                 path.append(current)
+                y_steps += 1
+                if y_steps > 1000:  # Safety break
+                    print(f"⚠️ Too many Y steps, breaking")
+                    break
             
             # Add via if layer change needed
             if current.z != end.z:
                 current = Point3D(current.x, current.y, end.z)
                 path.append(current)
                 net.via_count += 1
+                print(f"     Added via: layer {current.z} → {end.z}")
+            
+            print(f"     Path segment complete: {x_steps} X steps, {y_steps} Y steps")
         
         net.route_path = path
         net.success = True
         net.routed = True
         net.total_length = len(path)
+        
+        print(f"✅ CPU routing complete for {net.name}:")
+        print(f"   Total path points: {len(path)}")
+        print(f"   Vias used: {net.via_count}")
+        print(f"   Path length: {net.total_length} grid units")
+        print(f"   First few path points:")
+        for i, point in enumerate(path[:5]):
+            print(f"     {i+1}: ({point.x}, {point.y}, layer {point.z})")
+        if len(path) > 5:
+            print(f"     ... and {len(path)-5} more points")
+        
         return True
     
     def cleanup(self):
@@ -987,12 +1021,19 @@ class OrthoRouteEngine:
         return result
     
     def _create_tracks_from_path(self, net: Net, path_world: List[Dict]) -> List[Dict]:
-        """Convert route path to KiCad tracks - THIS WAS THE MISSING PIECE!"""
+        """Convert route path to KiCad tracks - ENHANCED DEBUG VERSION"""
         if not path_world or len(path_world) < 2:
+            print(f"❌ No valid path for track creation: {len(path_world) if path_world else 0} points")
             return []
         
         debug_print = getattr(self, 'debug_print', print)
         tracks_created = []
+        
+        print(f"🔨 TRACK CREATION DEBUG for net {net.name}")
+        print(f"   Path has {len(path_world)} world coordinate points")
+        print(f"   First few path points:")
+        for i, point in enumerate(path_world[:3]):
+            print(f"     {i+1}: x={point['x']/1e6:.3f}mm, y={point['y']/1e6:.3f}mm, layer={point['layer']}")
         
         try:
             # Import KiCad modules
@@ -1001,43 +1042,60 @@ class OrthoRouteEngine:
             # Get board if available
             board = getattr(self, 'board', None)
             if not board:
-                debug_print("❌ No board available for track creation")
+                print("❌ CRITICAL: No board available for track creation")
                 return []
             
-            debug_print(f"🔨 Creating tracks for net {net.name} with {len(path_world)} points")
+            print(f"✅ Board available for track creation")
             
             # Create track segments between consecutive points
             for i in range(len(path_world) - 1):
                 start_point = path_world[i]
                 end_point = path_world[i + 1]
                 
+                print(f"   Creating track segment {i+1}/{len(path_world)-1}")
+                print(f"     From: ({start_point['x']/1e6:.3f}, {start_point['y']/1e6:.3f})mm")
+                print(f"     To: ({end_point['x']/1e6:.3f}, {end_point['y']/1e6:.3f})mm")
+                print(f"     Layer: {start_point['layer']}")
+                
                 # Skip if same point (shouldn't happen but be safe)
                 if (start_point['x'] == end_point['x'] and 
                     start_point['y'] == end_point['y'] and 
                     start_point['layer'] == end_point['layer']):
+                    print(f"     ⏭️ Skipping identical points")
                     continue
                 
                 # Create track segment
                 track = pcbnew.PCB_TRACK(board)
+                print(f"     ✅ PCB_TRACK object created")
                 
                 # Set start and end points (KiCad uses nanometers)
-                track.SetStart(pcbnew.VECTOR2I(int(start_point['x']), int(start_point['y'])))
-                track.SetEnd(pcbnew.VECTOR2I(int(end_point['x']), int(end_point['y'])))
+                start_vec = pcbnew.VECTOR2I(int(start_point['x']), int(start_point['y']))
+                end_vec = pcbnew.VECTOR2I(int(end_point['x']), int(end_point['y']))
+                
+                track.SetStart(start_vec)
+                track.SetEnd(end_vec)
+                print(f"     ✅ Track endpoints set")
                 
                 # Set layer
                 layer_id = self._get_kicad_layer_id(start_point['layer'])
                 track.SetLayer(layer_id)
+                print(f"     ✅ Track layer set to {layer_id}")
                 
                 # Set net
                 if hasattr(net, 'kicad_net') and net.kicad_net:
                     track.SetNet(net.kicad_net)
+                    print(f"     ✅ Track net set to '{net.kicad_net.GetNetname()}'")
+                else:
+                    print(f"     ⚠️ No KiCad net available for track")
                 
                 # Set track width (default to net width or board default)
-                track_width = getattr(net, 'width', 200000)  # 0.2mm default
+                track_width = getattr(net, 'width_nm', 200000)  # 0.2mm default
                 track.SetWidth(track_width)
+                print(f"     ✅ Track width set to {track_width/1000:.1f}μm")
                 
                 # Add to board
                 board.Add(track)
+                print(f"     ✅ Track added to board")
                 
                 tracks_created.append({
                     'start': {'x': start_point['x'], 'y': start_point['y']},
@@ -1046,15 +1104,20 @@ class OrthoRouteEngine:
                     'net_id': net.id,
                     'net_name': net.name
                 })
-                
-                debug_print(f"  ✅ Track segment {i+1}: ({start_point['x']/1e6:.2f}, {start_point['y']/1e6:.2f}) → ({end_point['x']/1e6:.2f}, {end_point['y']/1e6:.2f})")
+            
+            print(f"🎉 TRACK CREATION SUMMARY:")
+            print(f"   Created {len(tracks_created)} track segments for net {net.name}")
+            print(f"   Total path points processed: {len(path_world)}")
             
             # Handle layer changes (vias)
+            vias_created = 0
             for i in range(len(path_world) - 1):
                 start_point = path_world[i]
                 end_point = path_world[i + 1]
                 
                 if start_point['layer'] != end_point['layer']:
+                    print(f"   Creating via at layer change {start_point['layer']} → {end_point['layer']}")
+                    
                     # Create via
                     via = pcbnew.PCB_VIA(board)
                     via.SetPosition(pcbnew.VECTOR2I(int(end_point['x']), int(end_point['y'])))
@@ -1065,9 +1128,12 @@ class OrthoRouteEngine:
                         via.SetNet(net.kicad_net)
                     
                     board.Add(via)
-                    debug_print(f"  🔗 Via added at ({end_point['x']/1e6:.2f}, {end_point['y']/1e6:.2f}) layer {start_point['layer']}→{end_point['layer']}")
+                    vias_created += 1
+                    print(f"     ✅ Via created at ({end_point['x']/1e6:.3f}, {end_point['y']/1e6:.3f})")
             
-            debug_print(f"✅ Created {len(tracks_created)} track segments for net {net.name}")
+            print(f"   Created {vias_created} vias")
+            print(f"🎉 TOTAL OBJECTS CREATED: {len(tracks_created)} tracks + {vias_created} vias")
+            
             return tracks_created
             
         except Exception as e:

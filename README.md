@@ -1,5 +1,3 @@
-# AHHHH FUCKASS THIS WASN'T SUPPOSED TO BE PUBLIC
-
 
 ![Repo logo](/Assets/icon200.png)
 
@@ -42,30 +40,31 @@ OrthoRoute/
 
 ## Installation
 
-### Prerequisites
+### Quick Install (Recommended)
 
-- KiCad 7.0+ or 8.0+ (with KiCad 9.0+ IPC API support)
-- Python 3.8+
-- NVIDIA GPU with CUDA support (recommended)
-- CuPy library (for GPU acceleration)
+1. **Download** the `orthoroute-kicad-addon.zip` file (52.9KB)
+2. **Open KiCad PCB Editor**
+3. **Go to Tools → Plugin and Content Manager**
+4. **Click "Install from File"**
+5. **Select** the `orthoroute-kicad-addon.zip` file
+6. **Restart KiCad completely**
+7. **Find the plugin** under Tools → External Plugins → "OrthoRoute GPU Autorouter"
 
-### Quick Install
+That's it! No Python setup, no development tools needed - just install the zip file through KiCad's built-in plugin manager.
 
-1. Download the latest `orthoroute-kicad-addon.zip` from releases (49.2KB optimized package)
-2. In KiCad, go to **Tools > Plugin and Content Manager**
-3. Click **Install from File** and select the downloaded zip
-4. Restart KiCad
+### Verify Installation
 
-### Development Installation
+After restarting KiCad:
+1. **Open any PCB** (or create a new one)
+2. **Check Tools menu** → External Plugins → You should see "OrthoRoute GPU Autorouter"
+3. **Click it** to open the routing dialog
+4. **Success!** The plugin is installed and ready to use
 
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/OrthoRoute.git
-cd OrthoRoute
+### System Requirements
 
-# Install in development mode
-python install_dev.py
-```
+- **KiCad 8.0 or 9.0** (tested and working)
+- **Any OS**: Windows, Linux, macOS
+- **Optional**: NVIDIA GPU for acceleration (automatic CPU fallback if not available)
 
 ## API Compatibility
 
