@@ -20,16 +20,16 @@ The plugin transforms the sequential routing process into a massively parallel o
 
 ## Features
 
-- **🔄 Process Isolation**: GPU operations run in separate process, KiCad crash protection guaranteed
-- **⚡ GPU Acceleration**: Uses CUDA/CuPy for high-performance routing computations
-- **📡 File-Based Communication**: Plugin and server communicate via JSON files, no direct memory sharing
-- **🛡️ Crash Protection**: KiCad remains stable even if GPU operations fail
-- **🌊 Wave Propagation Algorithm**: Advanced routing algorithm for optimal trace placement
-- **📐 Orthogonal Routing Algorithm**: Specialized algorithm for backplanes and grid-based layouts
-- **🔌 KiCad Integration**: Seamless integration as a KiCad action plugin with dual API support
-- **🚀 Future-Proof**: Supports both legacy SWIG API and new IPC API for KiCad 9.0+ compatibility
-- **👁️ Real-time Visualization**: Optional routing visualization and debugging
-- **🧪 Comprehensive Testing**: Extensive test suite including headless testing with KiCad CLI
+- **Process Isolation**: GPU operations run in separate process, KiCad crash protection guaranteed
+- **GPU Acceleration**: Uses CUDA/CuPy for high-performance routing computations
+- **File-Based Communication**: Plugin and server communicate via JSON files, no direct memory sharing
+- **Crash Protection**: KiCad remains stable even if GPU operations fail
+- **Wave Propagation Algorithm**: Advanced routing algorithm for optimal trace placement
+- **Orthogonal Routing Algorithm**: Specialized algorithm for backplanes and grid-based layouts
+- **KiCad Integration**: Seamless integration as a KiCad action plugin with dual API support
+- **Future-Proof**: Supports both legacy SWIG API and new IPC API for KiCad 9.0+ compatibility
+- **Real-time Visualization**: Optional routing visualization and debugging
+- **Comprehensive Testing**: Extensive test suite including headless testing with KiCad CLI
 
 ## Architecture: Process Isolation Design
 
@@ -54,16 +54,16 @@ OrthoRoute uses a **dual-process architecture** that completely isolates GPU ope
 │  ┌─────────────────────────────┐    │    │  ┌─────────────────────────────┐    │
 │  │    JSON File Interface      │◀───┼────┤▶│    JSON File Interface      │    │
 │  │                             │    │    │  │                             │    │
-│  │  📄 routing_request.json    │    │    │  │  📄 routing_request.json    │    │
-│  │  📄 routing_status.json     │    │    │  │  📄 routing_status.json     │    │
-│  │  📄 routing_result.json     │    │    │  │  📄 routing_result.json     │    │
-│  │  📄 server.log              │    │    │  │  📄 server.log              │    │
-│  │  🚩 shutdown.flag           │    │    │  │  🚩 shutdown.flag           │    │
+│  │  📄 routing_request.json    │    │    │  │  📄 routing_request.json   │    │
+│  │  📄 routing_status.json     │    │    │  │  📄 routing_status.json    │    │
+│  │  📄 routing_result.json     │    │    │  │  📄 routing_result.json    │    │
+│  │  📄 server.log              │    │    │  │  📄 server.log             │    │
+│  │  🚩 shutdown.flag           │    │    │  │  🚩 shutdown.flag          │    │
 │  │                             │    │    │  │                             │    │
 │  └─────────────────────────────┘    │    │  └─────────────────────────────┘    │
 │                                     │    │                                     │
 │  Memory Space: KiCad + wxPython     │    │  Memory Space: CuPy + GPU Kernels   │
-│  No GPU libraries loaded            │    │  No KiCad libraries loaded           │
+│  No GPU libraries loaded            │    │  No KiCad libraries loaded          │
 │                                     │    │                                     │
 └─────────────────────────────────────┘    └─────────────────────────────────────┘
                    ▲                                           ▲
@@ -76,20 +76,20 @@ OrthoRoute uses a **dual-process architecture** that completely isolates GPU ope
 
 ### Communication Protocol
 
-1. **📤 Request**: Plugin writes board data to `routing_request.json`
-2. **⚡ Processing**: Server loads data, runs GPU routing, updates `routing_status.json`
-3. **📥 Response**: Server writes results to `routing_result.json`
-4. **🔄 Monitoring**: Plugin polls status file for progress updates
-5. **✅ Completion**: Plugin reads results and applies tracks to KiCad board
-6. **🧹 Cleanup**: Temporary files cleaned up, server process terminated
+1. **Request**: Plugin writes board data to `routing_request.json`
+2. **Processing**: Server loads data, runs GPU routing, updates `routing_status.json`
+3. **Response**: Server writes results to `routing_result.json`
+4. **Monitoring**: Plugin polls status file for progress updates
+5. **Completion**: Plugin reads results and applies tracks to KiCad board
+6. **Cleanup**: Temporary files cleaned up, server process terminated
 
 ### Benefits of Process Isolation
 
-- **🛡️ Crash Protection**: GPU crashes cannot affect KiCad process
-- **💾 Memory Safety**: No shared memory between KiCad and GPU operations
-- **🔧 Independent Updates**: Server and plugin can be updated separately
-- **🧪 Easy Testing**: Server can be tested independently of KiCad
-- **⚖️ Resource Management**: GPU memory isolated from KiCad memory usage
+- **Crash Protection**: GPU crashes cannot affect KiCad process
+- **Memory Safety**: No shared memory between KiCad and GPU operations
+- **Independent Updates**: Server and plugin can be updated separately
+- **Easy Testing**: Server can be tested independently of KiCad
+- **Resource Management**: GPU memory isolated from KiCad memory usage
 
 ## Project Structure
 
