@@ -1,11 +1,12 @@
 <table width="100%">
   <tr>
-    <td align="right" width="400">
+    <td align="right" width="300">
       <img src="/Assets/icon200.png" alt="OpenCut Logo" width="300" />
     </td>
     <td align="left">
       <h1>OrthoRoute</h1>
       <h3 style="margin-top: -10px;">A high-performance GPU-accelerated autorouter plugin for KiCad</h3>
+      <h3 style="margin-top: -10px;">Never trust the autorouter, but this one is fast!</h3>
     </td>
   </tr>
 </table>
