@@ -1,0 +1,38 @@
+{
+  "name": "Minimal Track Test",
+  "description": "Simple test plugin that draws one track on the board",
+  "description_full": "A minimal KiCad plugin to test basic track creation using the IPC API. Creates one horizontal track from (10mm,10mm) to (30mm,10mm) with 0.25mm width.",
+  "identifier": "com.github.orthoroute.minimal-track-test",
+  "type": "plugin",
+  "author": {
+    "name": "Test Author",
+    "contact": {
+      "email": "test@example.com"
+    }
+  },
+  "maintainer": {
+    "name": "Test Maintainer",
+    "contact": {
+      "email": "test@example.com"
+    }
+  },
+  "license": "MIT",
+  "resources": {
+    "homepage": "https://github.com/example/minimal-track-test"
+  },
+  "tags": [
+    "test",
+    "track",
+    "minimal",
+    "api"
+  ],
+  "keep_on_update": [],
+  "versions": [
+    {
+      "version": "1.0.0",
+      "status": "stable",
+      "kicad_version": "9.0",
+      "install_size": 2048
+    }
+  ]
+}

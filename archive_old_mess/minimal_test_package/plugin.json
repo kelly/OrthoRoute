@@ -1,0 +1,32 @@
+{
+  "$schema": "https://go.kicad.org/api/schemas/v1/plugin.json",
+  "identifier": "com.github.orthoroute.minimal-track-test",
+  "name": "Minimal Track Test",
+  "description": "Simple test plugin that draws one track",
+  "version": "1.0.0",
+  "author": {
+    "name": "test",
+    "contact": "test@example.com"
+  },
+  "license": "MIT",
+  "requirements": {
+    "python": ">=3.8",
+    "packages": [
+      "kicad-python>=0.4.0"
+    ]
+  },
+  "runtime": {
+    "type": "python",
+    "python_interpreter": "auto"
+  },
+  "actions": [
+    {
+      "identifier": "minimal-track-test",
+      "name": "Minimal Track Test",
+      "description": "Draw one simple test track",
+      "category": "Testing",
+      "show_in_toolbar": true,
+      "entrypoint": "minimal_track_test.run"
+    }
+  ]
+}

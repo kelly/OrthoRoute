@@ -1,0 +1,43 @@
+{
+  "name": "Bare Minimum IPC Test",
+  "description": "Absolute minimum working KiCad IPC API plugin",
+  "description_full": "This is the simplest possible KiCad IPC API plugin that creates one track and exits cleanly. Use this to test your IPC API setup.",
+  "identifier": "com.orthoroute.bare_minimum_test",
+  "type": "plugin",
+  "author": {
+    "name": "OrthoRoute Team",
+    "contact": {
+      "web": "https://github.com/bbenchoff/OrthoRoute"
+    }
+  },
+  "maintainer": {
+    "name": "OrthoRoute Team", 
+    "contact": {
+      "web": "https://github.com/bbenchoff/OrthoRoute"
+    }
+  },
+  "license": "MIT",
+  "resources": {
+    "icon": "icon.png"
+  },
+  "versions": [
+    {
+      "version": "1.0.0",
+      "status": "stable",
+      "kicad_version": "9.0.0",
+      "kicad_version_max": "10.99.99"
+    }
+  ],
+  "python": {
+    "requires": ["kicad-python"]
+  },
+  "actions": [
+    {
+      "identifier": "bare_minimum_test",
+      "name": "Bare Minimum IPC Test",
+      "description": "Creates one test track using IPC API",
+      "type": "pcbnew",
+      "entry_point": "bare_minimum_working.py"
+    }
+  ]
+}

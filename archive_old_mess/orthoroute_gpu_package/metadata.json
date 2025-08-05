@@ -1,0 +1,37 @@
+{
+  "$schema": "https://go.kicad.org/pcm/schemas/v1",
+  "name": "OrthoRoute GPU Autorouter",
+  "description": "High-performance GPU-accelerated PCB autorouting with CuPy",
+  "description_full": "Professional orthogonal PCB autorouting using GPU acceleration via CuPy. Features real-time visual feedback, intelligent routing algorithms, and seamless KiCad integration. No SWIG dependencies - uses modern KiCad 9.0+ IPC API.",
+  "identifier": "com.github.benchoff.orthoroute-gpu",
+  "type": "plugin",
+  "author": {
+    "name": "Benchoff",
+    "contact": {
+      "web": "https://github.com/bbenchoff/OrthoRoute"
+    }
+  },
+  "license": "MIT",
+  "resources": {
+    "homepage": "https://github.com/bbenchoff/OrthoRoute"
+  },
+  "tags": [
+    "autorouter",
+    "routing",
+    "gpu",
+    "performance",
+    "tracks"
+  ],
+  "versions": [
+    {
+      "version": "1.0.0",
+      "status": "stable",
+      "kicad_version": "9.0",
+      "install_size": 21308,
+      "runtime": "ipc",
+      "download_size": 9648,
+      "download_sha256": "3c2d315d4e5d013964c06af774f45b9bf1bd186750f75cc0e66ae3aa3803c16a",
+      "download_url": "https://github.com/bbenchoff/OrthoRoute/releases/download/v1.0.0/orthoroute-gpu-package.zip"
+    }
+  ]
+}

@@ -1,0 +1,76 @@
+{
+  "$schema": "https://go.kicad.org/pcm/schemas/v1",
+  "identifier": "com.github.bbenchoff.orthoroute",
+  "type": "plugin",
+  "name": "OrthoRoute GPU Autorouter",
+  "description": "High-performance GPU-accelerated autorouter using process isolation",
+  "description_full": "OrthoRoute is a high-performance GPU-accelerated PCB autorouter that leverages NVIDIA CUDA through CuPy for parallel routing algorithms using KiCad's modern IPC API. Features include GPU-accelerated wavefront routing, process isolation for maximum KiCad stability, real-time visualization, and support for multi-layer boards.",
+  "version": "1.0.0",
+  "author": {
+    "name": "bbenchoff",
+    "contact": {
+      "web": "https://github.com/bbenchoff/OrthoRoute"
+    }
+  },
+  "license": "WTFPL",
+  "resources": {
+    "homepage": "https://github.com/bbenchoff/OrthoRoute",
+    "repository": "https://github.com/bbenchoff/OrthoRoute"
+  },
+  "requirements": {
+    "python": ">=3.8",
+    "packages": [
+      "kicad-python>=0.4.0"
+    ]
+  },
+  "runtime": "ipc",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "status": "stable",
+      "kicad_version": "9.0"
+    }
+  ],
+  "actions": [
+    {
+      "identifier": "orthoroute.ultra_simple",
+      "name": "Ultra Simple Test",
+      "description": "Ultra simple test to verify plugin loading",
+      "category": "Testing",
+      "icon": "icon.png",
+      "show_in_toolbar": true,
+      "show_in_menu": true,
+      "entrypoint": "ultra_simple_test.py"
+    },
+    {
+      "identifier": "orthoroute.minimal_test",
+      "name": "Minimal Test Plugin",
+      "description": "Minimal SWIG test plugin with direct registration",
+      "category": "Testing",
+      "icon": "icon.png",
+      "show_in_toolbar": false,
+      "show_in_menu": true,
+      "entrypoint": "minimal_test_plugin.py"
+    },
+    {
+      "identifier": "orthoroute.simple_ipc_test",
+      "name": "Simple IPC Test",
+      "description": "Test KiCad IPC API connection and create one test track",
+      "category": "Testing",
+      "icon": "icon.png",
+      "show_in_toolbar": false,
+      "show_in_menu": true,
+      "entrypoint": "simple_ipc_test_clean.py"
+    },
+    {
+      "identifier": "orthoroute.simple_track_test",
+      "name": "Simple Track Test",
+      "description": "Test basic track creation - draws one test track",
+      "category": "Testing",
+      "icon": "icon.png",
+      "show_in_toolbar": false,
+      "show_in_menu": true,
+      "entrypoint": "simple_track_test.py"
+    }
+  ]
+}

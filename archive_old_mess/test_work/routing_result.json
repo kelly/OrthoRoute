@@ -1,0 +1,50 @@
+{
+  "success": true,
+  "routed_nets": [
+    {
+      "success": true,
+      "net_name": "VCC",
+      "path": [
+        {
+          "x": 10000000,
+          "y": 10000000,
+          "layer": 0,
+          "pad_name": "U1.1"
+        },
+        {
+          "x": 30000000,
+          "y": 30000000,
+          "layer": 0,
+          "pad_name": "R1.1"
+        }
+      ],
+      "length": 2
+    },
+    {
+      "success": true,
+      "net_name": "GND",
+      "path": [
+        {
+          "x": 15000000,
+          "y": 15000000,
+          "layer": 0,
+          "pad_name": "U1.2"
+        },
+        {
+          "x": 35000000,
+          "y": 35000000,
+          "layer": 0,
+          "pad_name": "R1.2"
+        }
+      ],
+      "length": 2
+    }
+  ],
+  "failed_nets": [],
+  "statistics": {
+    "total_nets": 2,
+    "routed_count": 2,
+    "failed_count": 0,
+    "success_rate": 100.0
+  }
+}

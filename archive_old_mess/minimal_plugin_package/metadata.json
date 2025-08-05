@@ -1,0 +1,15 @@
+{
+  "name": "Minimal Track Test Plugin",
+  "description": "Minimal KiCad IPC plugin for testing - draws one track",
+  "identifier": "com.github.minimal.test",
+  "type": "plugin",
+  "version": "1.0.0",
+  "author": {
+    "name": "Test Author",
+    "contact": {
+      "web": "https://github.com/bbenchoff/OrthoRoute"
+    }
+  },
+  "license": "WTFPL",
+  "kicad_version": "9.0"
+}

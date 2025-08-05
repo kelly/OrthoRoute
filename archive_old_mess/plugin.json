@@ -1,0 +1,33 @@
+{
+  "$schema": "https://go.kicad.org/api/schemas/v1/plugin.json",
+  "identifier": "com.github.bbenchoff.orthoroute",
+  "name": "OrthoRoute GPU Autorouter",
+  "description": "High-performance GPU-accelerated autorouter using process isolation",
+  "version": "1.0.0",
+  "author": {
+    "name": "bbenchoff",
+    "contact": "https://github.com/bbenchoff/OrthoRoute"
+  },
+  "license": "WTFPL",
+  "requirements": {
+    "python": ">=3.8",
+    "packages": [
+      "kicad-python>=0.4.0"
+    ]
+  },
+  "runtime": {
+    "type": "python",
+    "python_interpreter": "auto"
+  },
+  "actions": [
+    {
+      "identifier": "orthoroute.run",
+      "name": "OrthoRoute GPU Autorouter",
+      "description": "Launch the OrthoRoute GPU-accelerated autorouter",
+      "category": "Routing",
+      "icon": "icon.png",
+      "show_in_toolbar": true,
+      "entrypoint": "orthoroute_ipc_plugin.py"
+    }
+  ]
+}

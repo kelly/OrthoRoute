@@ -1,0 +1,27 @@
+{
+  "$schema": "https://go.kicad.org/pcm/schemas/v1",
+  "name": "Ultra Simple IPC Test Plugin",
+  "description": "Test plugin demonstrating modern KiCad IPC API without SWIG dependencies",
+  "description_full": "A minimal test plugin that demonstrates the modern KiCad 9.0+ IPC API architecture without requiring SWIG bindings. Shows toolbar button integration and IPC communication with comprehensive logging for debugging.",
+  "identifier": "com.github.benchoff.ultra-simple-ipc-test",
+  "type": "plugin",
+  "author": {
+    "name": "Benchoff",
+    "contact": {
+      "web": "https://github.com/bbenchoff/OrthoRoute"
+    }
+  },
+  "license": "MIT",
+  "resources": {
+    "homepage": "https://github.com/bbenchoff/OrthoRoute"
+  },
+  "versions": [
+    {
+      "version": "1.0.0",
+      "status": "stable",
+      "kicad_version": "9.0",
+      "runtime": "ipc",
+      "install_size": 15000
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+    "identifier": "com.github.benchoff.orthoroute-gpu",
+    "name": "OrthoRoute GPU Autorouter", 
+    "description": "GPU-accelerated PCB autorouter using CuPy",
+    "runtime": {
+        "type": "python",
+        "min_version": "3.8"
+    },
+    "actions": [
+        {
+            "identifier": "simple_button_test",
+            "name": "Simple Button Test",
+            "description": "Simple test to verify IPC plugin button execution",
+            "show-button": true,
+            "scopes": ["pcb"],
+            "entrypoint": "simple_button_test.py",
+            "icons-light": ["icon24.png"]
+        },
+        {
+            "identifier": "gpu_autorouter_run", 
+            "name": "Run GPU Autorouter",
+            "description": "Route the board using GPU-accelerated algorithms",
+            "show-button": false,
+            "scopes": ["pcb"],
+            "entrypoint": "gpu_autorouter.py",
+            "icons-light": ["icon24.png"]
+        }
+    ]
+}

@@ -1,0 +1,12 @@
+{
+  "name": "Ultra Simple IPC Test",
+  "description": "A minimal test plugin using KiCad 9.0+ IPC API",
+  "description_full": "A minimal test plugin that demonstrates KiCad 9.0+ IPC plugin system with toolbar button integration. Uses pure IPC API without SWIG dependencies.",
+  "version": "1.0.0",
+  "author": "bbenchoff",
+  "license": "WTFPL",
+  "resources": {
+    "homepage": "https://github.com/bbenchoff/OrthoRoute"
+  },
+  "tags": ["ipc", "test", "toolbar", "kicad9"]
+}
