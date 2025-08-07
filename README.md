@@ -6,12 +6,10 @@
     <td align="left">
       <h1>OrthoRoute</h1>
       <h3 style="margin-top: -10px;">A high-performance GPU-accelerated autorouter plugin for KiCad</h3>
-      <h3 style="margin-top: -10px;">Never trust the autorouter, but this one is fast!</h3>
+      <h3 style="margin-top: -10px;">Never trust the autorouter, but at least this one is fast!</h3>
     </td>
   </tr>
 </table>
-
-__"Never Trust The Autorouter"__
 
 TODO: Ping @anne_engineer when this is done, let her launch it.
 
