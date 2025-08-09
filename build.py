@@ -30,16 +30,16 @@ class OrthoRouteBuildSystem:
             'production': {
                 'name': 'orthoroute-production',
                 'description': 'OrthoRoute Professional PCB Autorouting Plugin',
-                'main_file': 'orthoroute.py',
+                'main_file': 'src/orthoroute.py',
                 'include_gpu': True,
                 'include_docs': True,
                 'include_tests': False,
                 'include_debug': False
             },
             'lite': {
-                'name': 'orthoroute-lite',
-                'description': 'OrthoRoute Lite - Essential autorouting functionality',
-                'main_file': 'orthoroute.py',
+                'name': 'orthoroute',
+                'description': 'OrthoRoute - Professional PCB autorouting functionality',
+                'main_file': 'src/orthoroute.py',
                 'include_gpu': False,
                 'include_docs': False,
                 'include_tests': False,
@@ -48,7 +48,7 @@ class OrthoRouteBuildSystem:
             'development': {
                 'name': 'orthoroute-dev',
                 'description': 'OrthoRoute Development Build with debugging tools',
-                'main_file': 'orthoroute.py',
+                'main_file': 'src/orthoroute.py',
                 'include_gpu': True,
                 'include_docs': True,
                 'include_tests': True,
@@ -123,18 +123,39 @@ class OrthoRouteBuildSystem:
         """Copy core plugin files"""
         logger.info(f"📂 Copying core files for {package_config['name']}...")
         
-        # Main plugin file
-        main_file = self.project_root / package_config['main_file']
-        if main_file.exists():
-            shutil.copy2(main_file, package_dir / "__init__.py")
-            logger.info(f"✓ Copied main plugin: {main_file.name}")
-        
-        # Source directory
+        # Source directory first
         src_dir = self.project_root / "src"
         if src_dir.exists():
             package_src = package_dir / "src"
             shutil.copytree(src_dir, package_src)
             logger.info(f"✓ Copied source directory: {len(list(src_dir.glob('*.py')))} files")
+        
+        # Main plugin file (create entry point)
+        main_file = self.project_root / package_config['main_file']
+        if main_file.exists():
+            # Create a simple entry point that imports from src
+            entry_point = f"""#!/usr/bin/env python3
+'''
+{package_config['name']} - PCB Autorouting Plugin
+Entry point for the OrthoRoute application
+'''
+
+import sys
+from pathlib import Path
+
+# Add src directory to path
+src_path = Path(__file__).parent / "src"
+sys.path.insert(0, str(src_path))
+
+# Import and run the main application
+import orthoroute
+
+if __name__ == "__main__":
+    sys.exit(orthoroute.main())
+"""
+            with open(package_dir / "__init__.py", 'w', encoding='utf-8') as f:
+                f.write(entry_point)
+            logger.info(f"✓ Created entry point from {main_file.name}")
         
         # Assets
         assets_dir = self.project_root / "assets"

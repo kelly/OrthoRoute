@@ -803,3 +803,6 @@ def run_routing_real(request, gpu_available):
         'tracks': routed_tracks,
         'vias': routed_vias
     }
+
+# Alias for compatibility with existing imports
+GPURoutingEngine = RevolutionaryGPUEngine
