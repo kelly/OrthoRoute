@@ -74,8 +74,28 @@ class KiCadInterface:
             else:
                 self.client = KiCad(timeout_ms=timeout_ms)
 
-            # Get board to confirm connection
-            self.board = _ipc_retry(self.client.get_board, "get_board", max_retries=3, sleep_s=0.5)
+            # Get board to confirm connection - try different methods
+            try:
+                # Method 1: Try get_board directly
+                self.board = _ipc_retry(self.client.get_board, "get_board", max_retries=2, sleep_s=0.5)
+            except Exception as e1:
+                logger.warning(f"get_board failed: {e1}")
+                try:
+                    # Method 2: Try getting open documents first
+                    docs = self.client.get_open_documents()
+                    if docs and len(docs) > 0:
+                        # Use first open document
+                        self.board = docs[0]
+                        logger.info(f"✅ Retrieved board from open documents: {getattr(self.board, 'name', 'Unknown')}")
+                    else:
+                        raise Exception("No open documents found")
+                except Exception as e2:
+                    logger.warning(f"get_open_documents failed: {e2}")
+                    # Method 3: Try direct board access
+                    self.board = self.client.board
+                    if not self.board:
+                        raise Exception("No board available through any method")
+                    
             self.connected = True
             logger.info("✅ Connected to KiCad IPC API and retrieved board")
             return True
@@ -181,6 +201,29 @@ class KiCadInterface:
         except Exception as e:
             logger.error(f"Error getting vias: {e}")
 
+        # Get copper zones/planes for plane-aware routing
+        copper_zones = []
+        try:
+            zones = _ipc_retry(board.get_zones, "get_zones", max_retries=2, sleep_s=0.5)
+            for zone in zones:
+                try:
+                    zone_net = getattr(zone, 'net', None)
+                    zone_layer = getattr(zone, 'layer', 'F.Cu')
+                    if zone_net and hasattr(zone_net, 'name'):
+                        zone_net_name = zone_net.name
+                        copper_zones.append({
+                            'net': zone_net_name,
+                            'layer': zone_layer,
+                            'filled': getattr(zone, 'is_filled', True)
+                        })
+                        logger.debug(f"Found copper zone: {zone_net_name} on {zone_layer}")
+                except Exception as e:
+                    logger.debug(f"Zone parse error: {e}")
+            
+            logger.info(f"Found {len(copper_zones)} copper zones/planes")
+        except Exception as e:
+            logger.debug(f"No zones found or error: {e}")
+
         # Nets (with pins derived from pads)
         nets = []
         try:
@@ -189,21 +232,58 @@ class KiCadInterface:
             pins_by_net: Dict[str, List[Dict]] = {}
             for pad in pads:
                 n = pad.get('net')
-                if not n:
+                if not n or n == "":
                     continue
                 pins_by_net.setdefault(n, []).append({'x': pad['x'], 'y': pad['y'], 'layer': 0, 'pad_name': pad.get('number')})
+            
+            logger.info(f"Found {len(pins_by_net)} nets with pads")
+            
+            # Create set of nets that have copper planes (should be skipped)
+            plane_nets = set(zone['net'] for zone in copper_zones if zone.get('filled', True))
+            if plane_nets:
+                logger.info(f"🏭 Found nets with copper planes: {', '.join(sorted(plane_nets))}")
+            
+            # Store all nets for debugging
+            all_nets_debug = []
+            routable_nets = []
+            
             for i, net in enumerate(board_nets):
                 try:
                     name = getattr(net, 'name', f'Net_{i}')
-                    nets.append({
-                        'id': i,
+                    net_pins = pins_by_net.get(name, [])
+                    
+                    # Add to debug list
+                    all_nets_debug.append({
                         'name': name,
-                        'pins': pins_by_net.get(name, []),
-                        'routed': False,
-                        'priority': 1
+                        'pins': len(net_pins),
+                        'has_plane': name in plane_nets,
+                        'routable': len(net_pins) >= 2 and name not in plane_nets
                     })
+                    
+                    # Skip nets with copper planes (already connected via plane)
+                    if name in plane_nets:
+                        logger.info(f"⚡ Skipping '{name}' - connected via copper plane")
+                        continue
+                    
+                    # Only include nets with 2+ pins for routing
+                    if len(net_pins) >= 2:
+                        routable_nets.append({
+                            'id': i,
+                            'name': name,
+                            'pins': net_pins,
+                            'routed': False,  # Always mark as unrouted initially
+                            'priority': 1
+                        })
+                        logger.debug(f"Added net '{name}' with {len(net_pins)} pins for routing")
+                    else:
+                        logger.debug(f"Skipped net '{name}' - only {len(net_pins)} pins")
+                        
                 except Exception as e:
                     logger.warning(f"Net parse error #{i}: {e}")
+            
+            nets = routable_nets
+            logger.info(f"✅ Created {len(nets)} routable nets (excluding {len(plane_nets)} plane-connected nets)")
+            
         except Exception as e:
             logger.error(f"Error getting nets: {e}")
 
@@ -233,11 +313,13 @@ class KiCadInterface:
             'vias': vias,
             'pads': pads,
             'bounds': bounds,
+            'copper_zones': copper_zones,  # Include copper zone information
+            'all_nets_debug': all_nets_debug,  # For debugging net filtering
             'unrouted_count': len([n for n in nets if not n.get('routed', False)]),
             'routed_count': len([n for n in nets if n.get('routed', False)])
         }
 
-        logger.info(f"Extracted board data: {len(nets)} nets, {len(components)} components, {len(tracks)} tracks")
+        logger.info(f"Extracted board data: {len(nets)} routable nets, {len(components)} components, {len(tracks)} tracks, {len(copper_zones)} zones")
         return board_data
 
     def _get_layer_count(self) -> int:
@@ -249,18 +331,71 @@ class KiCadInterface:
     # The following are stubs; real creation via IPC will be added later
     def create_track(self, start_x: float, start_y: float, end_x: float, end_y: float,
                      layer: str, width: float, net_name: str) -> bool:
-        logger.info(f"[stub] Create track {net_name} {start_x:.2f},{start_y:.2f}->{end_x:.2f},{end_y:.2f} {layer} w={width}")
-        return True
+        """Create a straight track on the board via IPC.
+        Units: mm for coordinates and width. Layer by name (e.g., 'F.Cu').
+        """
+        if not self.connected or not self.board:
+            logger.warning("create_track called while not connected; ignoring")
+            return False
+        try:
+            # IPC API uses mm coordinates: provide as list of tuples
+            coords = [(float(start_x), float(start_y)), (float(end_x), float(end_y))]
+            
+            # Log the track creation attempt
+            logger.debug(f"🔧 Creating track: {net_name} from ({start_x:.3f}, {start_y:.3f}) to ({end_x:.3f}, {end_y:.3f}) on {layer}, width={width:.3f}mm")
+            
+            # Create track via IPC API
+            tr = self.board.add_track(coords, layer=layer or 'F.Cu', width=float(width) or 0.2, net=net_name or None)
+            
+            if tr:
+                logger.info(f"✅ Created track {net_name} {coords} {layer} w={width}")
+                return True
+            else:
+                logger.warning(f"❌ Track creation returned None for {net_name}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ IPC create_track failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
 
     def create_via(self, x: float, y: float, size: float, drill: float,
                    from_layer: str, to_layer: str, net_name: str) -> bool:
-        logger.info(f"[stub] Create via {net_name} at {x:.2f},{y:.2f} size={size} drill={drill}")
-        return True
+        """Create a via via IPC; size/drill in mm, layer pair by names.
+        """
+        if not self.connected or not self.board:
+            logger.warning("create_via called while not connected; ignoring")
+            return False
+        try:
+            layer_pair = (from_layer or 'F.Cu', to_layer or 'B.Cu')
+            
+            # Log the via creation attempt
+            logger.debug(f"🔧 Creating via: {net_name} at ({x:.3f}, {y:.3f}), size={size:.3f}, drill={drill:.3f}, layers={layer_pair}")
+            
+            # Create via via IPC API
+            via = self.board.add_via((float(x), float(y)), layer_pair, size=float(size) or 0.4, drill=float(drill) or 0.2, net=net_name or None)
+            
+            if via:
+                logger.info(f"✅ Created via {net_name} at ({x},{y}) size={size} drill={drill} layers={layer_pair}")
+                return True
+            else:
+                logger.warning(f"❌ Via creation returned None for {net_name}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ IPC create_via failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
 
     def refresh_board(self):
         try:
-            # Placeholder for a future refresh call via IPC
-            pass
+            # Some IPC implementations require an explicit refresh/commit; attempt if available
+            if hasattr(self.board, 'refresh'):
+                self.board.refresh()
+            elif hasattr(self.client, 'refresh_board'):
+                self.client.refresh_board()
         except Exception as e:
             logger.error(f"Error refreshing board: {e}")
 

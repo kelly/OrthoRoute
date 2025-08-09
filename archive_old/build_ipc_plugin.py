@@ -53,16 +53,26 @@ def create_plugin_package():
         src_dir = current_dir / "src"
         qt_ui = src_dir / "orthoroute_window.py"
         gpu_engine = src_dir / "gpu_routing_engine.py"
+        kicad_iface = src_dir / "kicad_interface.py"
+        routing_algo = src_dir / "routing_algorithms.py"
         if qt_ui.exists():
             shutil.copy2(qt_ui, plugins_dir / "orthoroute_window.py")
             print("✓ Included Qt UI: orthoroute_window.py")
         if gpu_engine.exists():
             shutil.copy2(gpu_engine, plugins_dir / "gpu_routing_engine.py")
             print("✓ Included GPU engine: gpu_routing_engine.py")
+        if routing_algo.exists():
+            shutil.copy2(routing_algo, plugins_dir / "routing_algorithms.py")
+            print("✓ Included routing algorithms: routing_algorithms.py")
+        if kicad_iface.exists():
+            shutil.copy2(kicad_iface, plugins_dir / "kicad_interface.py")
+            print("✓ Included KiCad interface: kicad_interface.py")
 
         # Copy icon if it exists
         icon_files = [
             current_dir / "assets" / "BigIcon.png",
+            current_dir / "assets" / "icon64.png",
+            current_dir / "assets" / "icon24.png",
             current_dir / "icon.png",
             current_dir / "icon24.png",
         ]
@@ -72,6 +82,26 @@ def create_plugin_package():
                 shutil.copy2(icon_file, plugins_dir / "icon.png")
                 print(f"✓ Copied icon: {icon_file.name}")
                 break
+        # Also copy ICO if available
+        ico_file = current_dir / "assets" / "icon.ico"
+        if ico_file.exists():
+            shutil.copy2(ico_file, plugins_dir / "icon.ico")
+            print("✓ Copied Windows icon: icon.ico")
+        else:
+            print("ℹ No Windows icon (icon.ico) found in assets. Skipping.")
+
+        # Optionally include offline wheels for PyQt6/PyOpenGL/numpy
+        vendor_wheels = current_dir / "vendor" / "wheels"
+        if vendor_wheels.exists() and any(p.suffix == ".whl" for p in vendor_wheels.iterdir()):
+            wheels_dst = plugins_dir / "wheels"
+            wheels_dst.mkdir(exist_ok=True)
+            copied = 0
+            for whl in vendor_wheels.glob("*.whl"):
+                shutil.copy2(whl, wheels_dst / whl.name)
+                copied += 1
+            print(f"✓ Included offline wheels: {copied} files")
+        else:
+            print("ℹ No offline wheels found (vendor/wheels). Skipping.")
 
         # Create plugin.json for IPC Python runtime (ensures KiCad passes IPC credentials)
         plugin_json = {
