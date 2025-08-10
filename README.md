@@ -4,8 +4,8 @@
       <img src="graphics/icon200.png" alt="OrthoRoute Logo" width="200" />
     </td>
     <td align="left">
-      <h2>Professional PCB Autorouting Using Official KiCad 9.0+ IPC APIs</h2>
-      <p><em>"Modern GPU-accelerated routing with official API integration."</em></p>
+      <h2>OrthoRoute - GPU Accelerated Autorouting for KiCad</h2>
+      <p><em>You shouldn't trust the autorouter, but at least this one is faster</em></p>
     </td>
   </tr>
 </table>
