@@ -26,7 +26,7 @@ GPU-accelerated PCB autorouting plugin with real-time visualization and professi
 
 ### Main Interface
 <div align="center">
-  <img src="graphics/screenshots/Screencap1-cseduino4.png" alt="OrthoRoute Main Interface" width="800">
+  <img src="graphics/screenshots/Screencap1-cseduino4.png" alt="OrthoRoute Main Interface" width="720">
   <br>
   <em>The OrthoRoute plugin interface showing an unrouted <a href="https://jpralves.net/pages/cseduino-v4.html">CSEduino v4</a> board with airwires and board information panel.</em>
 </div>
