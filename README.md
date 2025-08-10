@@ -22,6 +22,13 @@ GPU-accelerated PCB autorouting plugin with real-time visualization and professi
 - **Smart Algorithms**: Advanced pathfinding with obstacle avoidance and via optimization
 - **Manhattan Routing**: Where OrthoRoute gets its name. 
 
+## Screenshots
+
+<figure>
+  <img src="graphics/screenshots/Screencap1-cseduino4.png">
+  <figcaption>The basic Orthoroute plugin window with an unrouted <a href="https://jpralves.net/pages/cseduino-v4.html">CSEduino v4</a> board.</figcaption>
+</figure>
+
 ## 📦 Installation
 
 ### Option 1: Direct Download (Recommended)
