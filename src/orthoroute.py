@@ -423,11 +423,51 @@ def launch_qt_interface(board_data: Dict[str, Any], kicad_interface) -> None:
         logger.info("Creating QApplication...")
         app = QApplication(sys.argv)
         
-        # Set application icon if available
-        icon_path = Path(__file__).parent / "assets" / "BigIcon.png"
-        if icon_path.exists():
-            app.setWindowIcon(QIcon(str(icon_path)))
-            logger.info(f"App icon set: {icon_path}")
+        # Set application properties
+        app.setApplicationName("OrthoRoute")
+        app.setApplicationDisplayName("OrthoRoute - PCB Autorouter")
+        app.setApplicationVersion("1.0.0")
+        app.setOrganizationName("OrthoRoute")
+        app.setOrganizationDomain("github.com/bbenchoff/OrthoRoute")
+        
+        # Set application icon with multiple sizes for better platform support
+        icon = QIcon()
+        
+        # Try different icon paths (relative to script location)
+        script_dir = Path(__file__).parent
+        possible_icon_dirs = [
+            script_dir.parent / "assets",  # ../assets (when running from src/)
+            script_dir / "assets",         # ./assets (when running from root)
+            script_dir.parent / "Assets",  # ../Assets (case variation)
+            script_dir / "Assets"          # ./Assets (case variation)
+        ]
+        
+        # Icon files in order of preference (multiple sizes for better scaling)
+        icon_files = ["BigIcon.png", "icon200.png", "icon64.png", "icon24.png", "icon.svg.png"]
+        
+        icon_set = False
+        for icon_dir in possible_icon_dirs:
+            if icon_dir.exists():
+                for icon_file in icon_files:
+                    icon_path = icon_dir / icon_file
+                    if icon_path.exists():
+                        try:
+                            # Add multiple sizes to the icon for better platform support
+                            pixmap = QPixmap(str(icon_path))
+                            if not pixmap.isNull():
+                                icon.addPixmap(pixmap)
+                                logger.info(f"Added icon: {icon_path}")
+                                icon_set = True
+                        except Exception as e:
+                            logger.debug(f"Failed to load icon {icon_path}: {e}")
+                
+                if icon_set:
+                    app.setWindowIcon(icon)
+                    logger.info(f"Application icon set from {icon_dir}")
+                    break
+        
+        if not icon_set:
+            logger.warning("No application icon found - will use default Python icon")
         
         # Convert board data to format expected by the window
         logger.info("Converting board data for fast window launch...")
@@ -1247,9 +1287,20 @@ def process_nets_progressively(gui_data, progress_callback=None):
         pads = gui_data.get('_raw_pads', [])
         gui_tracks = gui_data.get('_gui_tracks', [])
         
+        # Get copper pour net names to exclude from airwire rendering
+        copper_pour_nets = set()
+        copper_pours = gui_data.get('copper_pours', [])
+        for pour in copper_pours:
+            net_name = pour.get('net_name')
+            if net_name and net_name != 'No Net' and net_name != 'Unknown':
+                copper_pour_nets.add(net_name)
+        
+        logger.info(f"Found {len(copper_pour_nets)} nets with copper pours: {list(copper_pour_nets)[:5]}...")
+        
         net_info = {}
         net_pins = {}
         airwires = []
+        filtered_airwires = 0
         
         logger.info(f"Starting progressive net processing: {len(nets)} nets to process")
         
@@ -1293,17 +1344,22 @@ def process_nets_progressively(gui_data, progress_callback=None):
                     
                     net_pins[net_name] = pins
                     
-                    # Create airwires for unrouted nets
+                    # Create airwires for unrouted nets, but skip nets that have copper pours
                     if len(pins) > 1 and not net_info.get(net_name, {}).get('routed', False):
-                        # Create airwires between pins (minimum spanning tree approach)
-                        for i in range(len(pins) - 1):
-                            airwires.append({
-                                'start_x': pins[i]['x'],
-                                'start_y': pins[i]['y'],
-                                'end_x': pins[i + 1]['x'],
-                                'end_y': pins[i + 1]['y'],
-                                'net': net_name
-                            })
+                        # Check if this net has a copper pour - if so, skip airwire creation
+                        if net_name in copper_pour_nets:
+                            filtered_airwires += 1
+                            logger.debug(f"Skipping airwires for net '{net_name}' - has copper pour")
+                        else:
+                            # Create airwires between pins (minimum spanning tree approach)
+                            for i in range(len(pins) - 1):
+                                airwires.append({
+                                    'start_x': pins[i]['x'],
+                                    'start_y': pins[i]['y'],
+                                    'end_x': pins[i + 1]['x'],
+                                    'end_y': pins[i + 1]['y'],
+                                    'net': net_name
+                                })
                     
                 except Exception as e:
                     logger.debug(f"Error processing net: {e}")
@@ -1326,6 +1382,7 @@ def process_nets_progressively(gui_data, progress_callback=None):
             del gui_data['_gui_tracks']
         
         logger.info(f"Progressive processing complete: {len(net_info)} nets, {len(airwires)} airwires")
+        logger.info(f"Filtered out {filtered_airwires} nets with copper pours")
         unrouted_count = len([n for n in net_info.values() if not n.get('routed', False) and n['pin_count'] > 1])
         logger.info(f"Unrouted nets: {unrouted_count}")
         
