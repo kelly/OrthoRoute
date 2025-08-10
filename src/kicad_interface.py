@@ -113,10 +113,28 @@ class KiCadInterface:
 
         board = self.board
 
-        # File/name
+        # File/name - Enhanced extraction
+        filename = 'Untitled'
         try:
-            filename = getattr(board, 'name', None) or getattr(board, 'filename', 'Untitled')
-        except Exception:
+            # Try multiple methods to get the board filename
+            if hasattr(board, 'name') and board.name:
+                filename = board.name
+            elif hasattr(board, 'filename') and board.filename:
+                filename = board.filename
+            elif hasattr(board, 'document') and board.document:
+                if hasattr(board.document, 'name') and board.document.name:
+                    filename = board.document.name
+                elif hasattr(board.document, 'filename') and board.document.filename:
+                    filename = board.document.filename
+            
+            # If we got a full path, extract just the filename
+            if filename and ('\\' in filename or '/' in filename):
+                import os
+                filename = os.path.basename(filename)
+                
+            logger.info(f"Board filename: {filename}")
+        except Exception as e:
+            logger.warning(f"Could not get board filename: {e}")
             filename = 'Untitled'
 
         # Components
@@ -305,15 +323,29 @@ class KiCadInterface:
 
         # Tracks - with proper coordinate conversion
         tracks = []
+        tracks_by_net = {}  # Track which nets have tracks
         try:
             trs = _ipc_retry(board.get_tracks, "get_tracks", max_retries=3, sleep_s=0.7)
             for i, tr in enumerate(trs):
                 try:
                     start = getattr(tr, 'start', None)
                     end = getattr(tr, 'end', None)
+                    net = getattr(getattr(tr, 'net', None), 'name', None)
                     s = (float(getattr(start, 'x', 0.0)) / 1000000.0, float(getattr(start, 'y', 0.0)) / 1000000.0) if start else (0.0, 0.0)  # Convert nm to mm
                     e = (float(getattr(end, 'x', 0.0)) / 1000000.0, float(getattr(end, 'y', 0.0)) / 1000000.0) if end else (0.0, 0.0)  # Convert nm to mm
-                    tracks.append({'start': {'x': s[0], 'y': s[1]}, 'end': {'x': e[0], 'y': e[1]}})
+                    
+                    track_data = {
+                        'start': {'x': s[0], 'y': s[1]}, 
+                        'end': {'x': e[0], 'y': e[1]},
+                        'net': net
+                    }
+                    tracks.append(track_data)
+                    
+                    # Track which nets have routing
+                    if net:
+                        tracks_by_net.setdefault(net, 0)
+                        tracks_by_net[net] += 1
+                        
                 except Exception as e:
                     logger.warning(f"Track parse error #{i}: {e}")
         except Exception as e:
@@ -517,14 +549,17 @@ class KiCadInterface:
                     
                     # Only include nets with 2+ pins for routing
                     if len(net_pins) >= 2:
+                        # Check if this net has tracks (is routed)
+                        is_routed = name in tracks_by_net and tracks_by_net[name] > 0
+                        
                         routable_nets.append({
                             'id': i,
                             'name': name,
                             'pins': net_pins,
-                            'routed': False,  # Always mark as unrouted initially
+                            'routed': is_routed,  # Mark as routed if tracks exist
                             'priority': 1
                         })
-                        logger.debug(f"Added net '{name}' with {len(net_pins)} pins for routing")
+                        logger.debug(f"Added net '{name}' with {len(net_pins)} pins for routing (routed: {is_routed})")
                     else:
                         logger.debug(f"Skipped net '{name}' - only {len(net_pins)} pins")
                         
@@ -537,7 +572,8 @@ class KiCadInterface:
         except Exception as e:
             logger.error(f"Error getting nets: {e}")
 
-        # Compute bounds from geometry (use pads, tracks, vias - all in mm)
+        # Get board dimensions using computed bounds from all geometry
+        # This is more reliable than trying to get dimensions from KiCad directly
         all_x = []
         all_y = []
         
@@ -548,29 +584,51 @@ class KiCadInterface:
             
         # Collect track coordinates (already in mm)
         for track in tracks:
-            all_x.extend([track['start_x'], track['end_x']])
-            all_y.extend([track['start_y'], track['end_y']])
+            all_x.extend([track['start']['x'], track['end']['x']])
+            all_y.extend([track['start']['y'], track['end']['y']])
             
         # Collect via coordinates (already in mm)
         for via in vias:
             all_x.extend([via['x'] - via['size']/2, via['x'] + via['size']/2])
             all_y.extend([via['y'] - via['size']/2, via['y'] + via['size']/2])
+        
+        # Collect component positions
+        for comp in components:
+            all_x.append(comp['x'])
+            all_y.append(comp['y'])
             
         # Set bounds with defaults if no geometry found
-        min_x = min(all_x) if all_x else 0.0
-        min_y = min(all_y) if all_y else 0.0
-        max_x = max(all_x) if all_x else 100.0
-        max_y = max(all_y) if all_y else 80.0
-        
-        # Add small margin
-        margin = 5.0
-        bounds = (min_x - margin, min_y - margin, max_x + margin, max_y + margin)
+        if all_x and all_y:
+            min_x = min(all_x)
+            min_y = min(all_y)
+            max_x = max(all_x)
+            max_y = max(all_y)
+            
+            # Add small margin
+            margin = 5.0
+            bounds = (min_x - margin, min_y - margin, max_x + margin, max_y + margin)
+            
+            # Calculate actual board dimensions from geometry
+            width = max_x - min_x + 2 * margin
+            height = max_y - min_y + 2 * margin
+            
+            logger.info(f"Board dimensions calculated from geometry: {width:.1f} x {height:.1f} mm")
+        else:
+            # Fallback if no geometry
+            bounds = (0.0, 0.0, 100.0, 80.0)
+            width = 100.0
+            height = 80.0
+            logger.warning("No geometry found - using default bounds 100x80mm")
+
+        # Get copper layer count
+        copper_layers = self._get_layer_count()
 
         board_data = {
             'filename': filename,
-            'width': bounds[2] - bounds[0],
-            'height': bounds[3] - bounds[1],
-            'layers': self._get_layer_count(),
+            'width': width,  # Use calculated width
+            'height': height,  # Use calculated height
+            'copper_layers': copper_layers,  # Changed from 'layers' to 'copper_layers'
+            'layers': copper_layers,  # Keep for backward compatibility
             'nets': nets,
             'components': components,
             'tracks': tracks,
@@ -584,14 +642,277 @@ class KiCadInterface:
             'routed_count': len([n for n in nets if n.get('routed', False)])
         }
 
-        logger.info(f"Extracted board data: {len(nets)} routable nets, {len(components)} components, {len(tracks)} tracks, {len(copper_zones)} zones")
+        # Generate airwires for unrouted nets
+        airwires = self._generate_airwires(nets, plane_nets)
+        board_data['airwires'] = airwires
+        
+        logger.info(f"Extracted board data: {filename} ({width:.1f}x{height:.1f}mm, {copper_layers} copper layers)")
+        logger.info(f"  {len(nets)} routable nets, {len(components)} components, {len(tracks)} tracks, {len(copper_zones)} zones")
+        logger.info(f"  Generated {len(airwires)} airwires for visualization")
         return board_data
 
     def _get_layer_count(self) -> int:
+        """Get the number of copper layers in the board"""
         try:
-            return getattr(self.board, 'layer_count', 2)
-        except Exception:
+            # Method 1: Analyze pad data to find unique copper layers
+            copper_layers_found = set()
+            try:
+                # Sample a few pads to check their layer information
+                pads = self.board.get_pads()
+                for pad in pads[:20]:  # Check first 20 pads
+                    padstack = getattr(pad, 'padstack', None)
+                    if padstack:
+                        padstack_layers = getattr(padstack, 'layers', [])
+                        for layer in padstack_layers:
+                            layer_str = str(layer)
+                            # Look for copper layer numbers (typically 3, 34 for front/back)
+                            if layer_str in ['3', '34']:  # F.Cu = 3, B.Cu = 34 in KiCad
+                                copper_layers_found.add(layer_str)
+                
+                # Standard KiCad copper layer mapping
+                known_copper_layers = {'3': 'F.Cu', '34': 'B.Cu'}
+                copper_count = len([layer for layer in copper_layers_found if layer in known_copper_layers])
+                
+                if copper_count > 0:
+                    logger.info(f"Detected {copper_count} copper layers from pad analysis: {[known_copper_layers.get(layer, layer) for layer in copper_layers_found if layer in known_copper_layers]}")
+                    return copper_count
+                    
+            except Exception as e:
+                logger.debug(f"Pad analysis for copper layers failed: {e}")
+            
+            # Method 2: Try to get layers directly from board
+            if hasattr(self.board, 'get_layers'):
+                try:
+                    layers = self.board.get_layers()
+                    if layers:
+                        # Count only copper layers
+                        copper_count = 0
+                        for layer in layers:
+                            layer_name = str(layer).lower()
+                            if 'cu' in layer_name or 'copper' in layer_name:
+                                copper_count += 1
+                        if copper_count > 0:
+                            logger.info(f"Found {copper_count} copper layers via get_layers()")
+                            return copper_count
+                except Exception as e:
+                    logger.debug(f"get_layers() failed: {e}")
+            
+            # Method 3: Try to get layer count from board properties
+            if hasattr(self.board, 'layer_count'):
+                layer_count = getattr(self.board, 'layer_count')
+                if isinstance(layer_count, int) and layer_count > 0:
+                    logger.info(f"Found {layer_count} layers via layer_count property")
+                    return layer_count
+            
+            # Method 4: Check zones for layer information
+            try:
+                zones = self.board.get_zones()
+                zone_layers = set()
+                for zone in zones:
+                    layer = getattr(zone, 'layer', None)
+                    if layer:
+                        zone_layers.add(str(layer))
+                
+                # Count copper layers from zones
+                copper_zone_layers = [layer for layer in zone_layers if layer in ['3', '34', 'F.Cu', 'B.Cu']]
+                if len(copper_zone_layers) > 0:
+                    detected_count = len(copper_zone_layers)
+                    logger.info(f"Detected {detected_count} copper layers from zones: {copper_zone_layers}")
+                    return detected_count
+                    
+            except Exception as e:
+                logger.debug(f"Zone analysis for copper layers failed: {e}")
+            
+            # Default assumption for PCBs
+            logger.info("Could not determine layer count - defaulting to 2 layers")
             return 2
+            
+        except Exception as e:
+            logger.warning(f"Error determining layer count: {e}")
+            return 2
+
+    def _generate_airwires(self, nets: List[Dict], plane_nets: set) -> List[Dict]:
+        """Generate airwires (ratsnest lines) for unrouted nets using minimum spanning tree"""
+        airwires = []
+        filtered_airwires = 0
+        
+        try:
+            for net in nets:
+                net_name = net.get('name', '')
+                pins = net.get('pins', [])
+                is_routed = net.get('routed', False)
+                
+                # Skip if routed or has copper plane connection
+                if is_routed or net_name in plane_nets:
+                    if net_name in plane_nets:
+                        filtered_airwires += 1
+                        logger.debug(f"Skipping airwires for net '{net_name}' - has copper pour")
+                    continue
+                
+                # Need at least 2 pins to create airwires
+                if len(pins) < 2:
+                    continue
+                
+                # Generate minimum spanning tree for this net's pins
+                mst_airwires = self._generate_mst_airwires(pins, net_name)
+                airwires.extend(mst_airwires)
+            
+            logger.info(f"Generated {len(airwires)} airwires from {len(nets)} nets")
+            logger.info(f"Filtered out {filtered_airwires} nets with copper pours")
+            
+        except Exception as e:
+            logger.error(f"Error generating airwires: {e}")
+            
+        return airwires
+    
+    def _generate_mst_airwires(self, pins: List[Dict], net_name: str) -> List[Dict]:
+        """Generate minimum spanning tree airwires for a single net"""
+        if len(pins) < 2:
+            return []
+        
+        # If only 2 pins, just connect them directly
+        if len(pins) == 2:
+            return [{
+                'start_x': pins[0]['x'],
+                'start_y': pins[0]['y'],
+                'end_x': pins[1]['x'],
+                'end_y': pins[1]['y'],
+                'net': net_name
+            }]
+        
+        # For 3+ pins, use Prim's minimum spanning tree algorithm
+        import math
+        
+        def distance(p1, p2):
+            """Calculate Euclidean distance between two pins"""
+            dx = p1['x'] - p2['x']
+            dy = p1['y'] - p2['y']
+            return math.sqrt(dx*dx + dy*dy)
+        
+        # Prim's MST algorithm
+        n = len(pins)
+        visited = [False] * n
+        min_edge = [float('inf')] * n
+        parent = [-1] * n
+        
+        # Start with pin 0
+        min_edge[0] = 0
+        mst_edges = []
+        
+        for _ in range(n):
+            # Find minimum weight edge from visited to unvisited
+            u = -1
+            for v in range(n):
+                if not visited[v] and (u == -1 or min_edge[v] < min_edge[u]):
+                    u = v
+            
+            visited[u] = True
+            
+            # Add edge to MST (except for the first vertex)
+            if parent[u] != -1:
+                mst_edges.append({
+                    'start_x': pins[parent[u]]['x'],
+                    'start_y': pins[parent[u]]['y'],
+                    'end_x': pins[u]['x'],
+                    'end_y': pins[u]['y'],
+                    'net': net_name
+                })
+            
+            # Update minimum edges for unvisited vertices
+            for v in range(n):
+                if not visited[v]:
+                    dist = distance(pins[u], pins[v])
+                    if dist < min_edge[v]:
+                        min_edge[v] = dist
+                        parent[v] = u
+        
+        return mst_edges
+
+    def _get_board_dimensions(self) -> Tuple[float, float]:
+        """Get board width and height in mm"""
+        try:
+            # Method 1: Try to get dimensions directly from board
+            if hasattr(self.board, 'get_dimensions'):
+                dimensions = self.board.get_dimensions()
+                if dimensions and hasattr(dimensions, 'width') and hasattr(dimensions, 'height'):
+                    width_mm = float(dimensions.width) / 1000000.0  # Convert nm to mm
+                    height_mm = float(dimensions.height) / 1000000.0  # Convert nm to mm
+                    if width_mm > 0 and height_mm > 0:
+                        logger.info(f"Board dimensions from get_dimensions(): {width_mm:.1f} x {height_mm:.1f} mm")
+                        return width_mm, height_mm
+            
+            # Method 2: Try to get board outline/edge cuts
+            if hasattr(self.board, 'get_board_outline'):
+                try:
+                    outline = self.board.get_board_outline()
+                    if outline:
+                        # Extract bounding box from outline
+                        min_x = min_y = float('inf')
+                        max_x = max_y = float('-inf')
+                        
+                        # Process outline points
+                        for point in outline:
+                            if hasattr(point, 'x') and hasattr(point, 'y'):
+                                x_mm = float(point.x) / 1000000.0
+                                y_mm = float(point.y) / 1000000.0
+                                min_x = min(min_x, x_mm)
+                                max_x = max(max_x, x_mm)
+                                min_y = min(min_y, y_mm)
+                                max_y = max(max_y, y_mm)
+                        
+                        if min_x != float('inf'):
+                            width_mm = max_x - min_x
+                            height_mm = max_y - min_y
+                            logger.info(f"Board dimensions from outline: {width_mm:.1f} x {height_mm:.1f} mm")
+                            return width_mm, height_mm
+                except Exception as e:
+                    logger.debug(f"Could not get board outline: {e}")
+            
+            # Method 3: Calculate from component and pad positions
+            all_x = []
+            all_y = []
+            
+            # Get footprint positions
+            try:
+                footprints = self.board.get_footprints()
+                for fp in footprints:
+                    pos = getattr(fp, 'position', None)
+                    if pos:
+                        x_mm = float(getattr(pos, 'x', 0.0)) / 1000000.0
+                        y_mm = float(getattr(pos, 'y', 0.0)) / 1000000.0
+                        all_x.append(x_mm)
+                        all_y.append(y_mm)
+            except Exception as e:
+                logger.debug(f"Could not get footprint positions: {e}")
+            
+            # Get pad positions
+            try:
+                pads = self.board.get_pads()
+                for pad in pads[:50]:  # Sample to avoid performance issues
+                    pos = getattr(pad, 'position', None)
+                    if pos:
+                        x_mm = float(getattr(pos, 'x', 0.0)) / 1000000.0
+                        y_mm = float(getattr(pos, 'y', 0.0)) / 1000000.0
+                        all_x.append(x_mm)
+                        all_y.append(y_mm)
+            except Exception as e:
+                logger.debug(f"Could not get pad positions: {e}")
+            
+            if all_x and all_y:
+                # Add margin around components
+                margin = 5.0  # 5mm margin
+                width_mm = max(all_x) - min(all_x) + 2 * margin
+                height_mm = max(all_y) - min(all_y) + 2 * margin
+                logger.info(f"Board dimensions estimated from components: {width_mm:.1f} x {height_mm:.1f} mm")
+                return width_mm, height_mm
+            
+            # Default fallback
+            logger.warning("Could not determine board dimensions - using default 100x80mm")
+            return 100.0, 80.0
+            
+        except Exception as e:
+            logger.error(f"Error getting board dimensions: {e}")
+            return 100.0, 80.0
 
     # The following are stubs; real creation via IPC will be added later
     def create_track(self, start_x: float, start_y: float, end_x: float, end_y: float,
