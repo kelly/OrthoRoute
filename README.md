@@ -1,7 +1,7 @@
 <table width="100%">
   <tr>
     <td align="right" width="300">
-      <img src="assets/icon200.png" alt="OrthoRoute Logo" width="200" />
+      <img src="graphics/icon200.png" alt="OrthoRoute Logo" width="200" />
     </td>
     <td align="left">
       <h2>Professional PCB Autorouting Using Official KiCad 9.0+ IPC APIs</h2>
@@ -74,7 +74,7 @@ OrthoRoute/
 │   ├── orthoroute_main.py     # Core routing logic
 │   ├── gpu_routing_engine.py  # GPU acceleration
 │   └── kicad_interface.py     # KiCad IPC integration
-├── assets/                    # Icons and resources
+├── graphics/                  # Icons and resources
 ├── docs/                      # Documentation
 ├── tests/                     # Test suite
 ├── build.py                   # Unified build system

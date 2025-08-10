@@ -157,13 +157,13 @@ def analyze_board_data(board) -> Dict[str, Any]:
                     logger.info(f"Ratsnest display setting: {appearance.ratsnest_display}")
                     
                     # Try to load authentic KiCad theme data
-                    theme_file = Path(__file__).parent / "assets" / "kicad_theme.json"
+                    theme_file = Path(__file__).parent / "graphics" / "kicad_theme.json"
                     if theme_file.exists():
                         try:
                             with open(theme_file, 'r') as f:
                                 kicad_json_theme = json.load(f)
                             kicad_theme_colors['json_theme'] = kicad_json_theme
-                            logger.info("✓ Loaded authentic KiCad theme from assets/kicad_theme.json")
+                            logger.info("✓ Loaded authentic KiCad theme from graphics/kicad_theme.json")
                         except Exception as e:
                             logger.warning(f"Could not load KiCad theme file: {e}")
                     else:
@@ -436,10 +436,8 @@ def launch_qt_interface(board_data: Dict[str, Any], kicad_interface) -> None:
         # Try different icon paths (relative to script location)
         script_dir = Path(__file__).parent
         possible_icon_dirs = [
-            script_dir.parent / "assets",  # ../assets (when running from src/)
-            script_dir / "assets",         # ./assets (when running from root)
-            script_dir.parent / "Assets",  # ../Assets (case variation)
-            script_dir / "Assets"          # ./Assets (case variation)
+            script_dir.parent / "graphics",  # ../graphics (when running from src/)
+            script_dir / "graphics",         # ./graphics (when running from root)
         ]
         
         # Icon files in order of preference (multiple sizes for better scaling)

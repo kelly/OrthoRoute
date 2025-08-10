@@ -51,7 +51,7 @@ OrthoRoute/                    # Clean, professional root
 │   ├── test_pad_polygons.py # Polygon pad tests
 │   ├── debug_*.py           # Debug utilities
 │   └── README.md            # Test documentation
-├── assets/                   # Icons and resources
+├── graphics/                 # Icons and resources
 ├── docs/                     # Documentation
 ├── build/                    # Build artifacts
 └── .git/, .venv/, etc.      # Standard project files

@@ -157,12 +157,12 @@ if __name__ == "__main__":
                 f.write(entry_point)
             logger.info(f"✓ Created entry point from {main_file.name}")
         
-        # Assets
-        assets_dir = self.project_root / "assets"
-        if assets_dir.exists():
-            package_assets = package_dir / "assets"
-            shutil.copytree(assets_dir, package_assets)
-            logger.info(f"✓ Copied assets: {len(list(assets_dir.glob('*')))} files")
+        # Graphics
+        graphics_dir = self.project_root / "graphics"
+        if graphics_dir.exists():
+            package_graphics = package_dir / "graphics"
+            shutil.copytree(graphics_dir, package_graphics)
+            logger.info(f"✓ Copied graphics: {len(list(graphics_dir.glob('*')))} files")
         
         # Requirements
         requirements_file = self.project_root / "requirements.txt"
