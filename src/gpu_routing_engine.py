@@ -2,6 +2,8 @@
 """
 GPU Routing Engine - Revolutionary CUDA-accelerated autorouter
 Integrates with reverse-engineered KiCad IPC APIs for professional routing
+
+Now featuring the breakthrough Frontier Reduction Algorithm achieving O(m log^(2/3) n) complexity!
 """
 
 import logging
@@ -12,7 +14,20 @@ from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+# Import the revolutionary frontier reduction algorithm
+try:
+    from .frontier_reduction_router import (
+        FrontierReductionRouter, 
+        CUDAFrontierReductionRouter,
+        integrate_frontier_reduction_with_orthoroute
+    )
+    FRONTIER_REDUCTION_AVAILABLE = True
+    logger = logging.getLogger(__name__)
+    logger.info("🚀 Frontier Reduction Algorithm loaded - O(m log^(2/3) n) routing available!")
+except ImportError as e:
+    logger = logging.getLogger(__name__)
+    logger.warning(f"Frontier Reduction Algorithm not available: {e}")
+    FRONTIER_REDUCTION_AVAILABLE = False
 
 @dataclass
 class RoutingResult:
@@ -91,7 +106,121 @@ class RevolutionaryGPUEngine:
         logger.info("🚀 Starting GPU routing of all nets...")
         start_time = time.time()
         
+        # Choose routing algorithm based on availability and board size
+        if self._should_use_frontier_reduction():
+            logger.info("🚀 Using Frontier Reduction Algorithm - O(m log^(2/3) n) complexity")
+            return self._route_with_frontier_reduction(progress_callback)
+        else:
+            logger.info("📊 Using traditional GPU routing algorithms")
+            return self._route_with_traditional_gpu(progress_callback)
+    
+    def _should_use_frontier_reduction(self) -> bool:
+        """Determine if we should use the frontier reduction algorithm"""
+        if not FRONTIER_REDUCTION_AVAILABLE:
+            return False
+        
+        # Get board complexity metrics
+        nets = self.connectivity_data.get('net_details', [])
+        bounds = self.connectivity_data.get('bounds', (0, 0, 100, 80))
+        
+        # Calculate grid size
+        width_mm = bounds[2] - bounds[0]
+        height_mm = bounds[3] - bounds[1]
+        layers = self.connectivity_data.get('copper_layers', 2)
+        
+        # Estimate grid nodes (0.1mm resolution)
+        grid_nodes = int(width_mm * 10) * int(height_mm * 10) * layers
+        
+        # Use frontier reduction for large boards where the complexity advantage kicks in
+        use_frontier = (
+            len(nets) > 100 or      # Many nets benefit from multi-source optimization
+            grid_nodes > 100000 or  # Large grids benefit from reduced complexity
+            layers > 4              # Multi-layer boards benefit from advanced algorithms
+        )
+        
+        logger.info(f"Board analysis: {len(nets)} nets, {grid_nodes} grid nodes, {layers} layers")
+        logger.info(f"Frontier reduction {'recommended' if use_frontier else 'not needed'}")
+        
+        return use_frontier
+    
+    def _route_with_frontier_reduction(self, progress_callback=None) -> RoutingResult:
+        """Route using the breakthrough frontier reduction algorithm"""
+        logger.info("🔥 Starting Frontier Reduction Algorithm routing...")
+        start_time = time.time()
+        
         try:
+            # Prepare net details for frontier reduction
+            net_details = self.connectivity_data.get('net_details', [])
+            unrouted_nets = [net for net in net_details if net.get('unrouted', True)]
+            
+            if not unrouted_nets:
+                logger.warning("No unrouted nets found for frontier reduction")
+                return RoutingResult(
+                    success=False,
+                    error="No unrouted nets to process",
+                    routing_time=time.time() - start_time
+                )
+            
+            logger.info(f"Frontier reduction processing {len(unrouted_nets)} unrouted nets")
+            
+            # Update progress
+            if progress_callback:
+                progress_callback(10, "Initializing frontier reduction algorithm...")
+            
+            # Run the frontier reduction algorithm
+            routing_results = integrate_frontier_reduction_with_orthoroute(
+                self.connectivity_data, unrouted_nets
+            )
+            
+            if progress_callback:
+                progress_callback(90, "Applying routing results...")
+            
+            # Create result object
+            total_nets = len(unrouted_nets)
+            routed_nets = routing_results.get('routed_nets', 0)
+            success_rate = routed_nets / total_nets if total_nets > 0 else 0.0
+            
+            result = RoutingResult(
+                success=routed_nets > 0,
+                nets_routed=routed_nets,
+                tracks_created=routing_results.get('tracks_created', 0),
+                vias_created=len([t for t in routing_results.get('tracks', []) if t.get('type') == 'via']),
+                success_rate=success_rate,
+                routing_time=time.time() - start_time,
+                gpu_time=routing_results.get('gpu_time', 0.0),
+                detailed_stats={
+                    'algorithm': 'frontier_reduction',
+                    'complexity': 'O(m log^(2/3) n)',
+                    'total_nets': total_nets,
+                    'routed_nets': routed_nets,
+                    'failed_nets': total_nets - routed_nets
+                }
+            )
+            
+            if progress_callback:
+                progress_callback(100, f"Frontier reduction complete: {routed_nets}/{total_nets} nets routed")
+            
+            logger.info(f"🎉 Frontier reduction complete: {routed_nets}/{total_nets} nets ({success_rate*100:.1f}%)")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Frontier reduction failed: {e}")
+            # Fallback to traditional routing
+            logger.info("Falling back to traditional GPU routing...")
+            return self._route_with_traditional_gpu(progress_callback)
+    
+    def _route_with_traditional_gpu(self, progress_callback=None) -> RoutingResult:
+        """Route using traditional GPU algorithms (fallback)"""
+        logger.info("📊 Starting traditional GPU routing...")
+        start_time = time.time()
+        
+        try:
+            import tempfile
+            import os
+            import sys
+            import subprocess
+            
             # Setup temporary directory for communication
             self.temp_dir = tempfile.mkdtemp(prefix="orthoroute_")
             logger.info(f"Created temp directory: {self.temp_dir}")

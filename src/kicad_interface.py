@@ -549,17 +549,22 @@ class KiCadInterface:
                     
                     # Only include nets with 2+ pins for routing
                     if len(net_pins) >= 2:
-                        # Check if this net has tracks (is routed)
-                        is_routed = name in tracks_by_net and tracks_by_net[name] > 0
+                        # Check if this net has tracks - but don't assume fully routed
+                        has_tracks = name in tracks_by_net and tracks_by_net[name] > 0
+                        
+                        # For airwire purposes, only mark as "routed" if it's a simple 2-pin net with tracks
+                        # Multi-pin nets might be partially routed and still need airwires
+                        is_fully_routed = has_tracks and len(net_pins) == 2
                         
                         routable_nets.append({
                             'id': i,
                             'name': name,
                             'pins': net_pins,
-                            'routed': is_routed,  # Mark as routed if tracks exist
+                            'routed': is_fully_routed,  # Only mark fully routed if 2 pins + tracks
+                            'has_tracks': has_tracks,   # Track if it has any tracks
                             'priority': 1
                         })
-                        logger.debug(f"Added net '{name}' with {len(net_pins)} pins for routing (routed: {is_routed})")
+                        logger.debug(f"Added net '{name}' with {len(net_pins)} pins (tracks: {has_tracks}, fully_routed: {is_fully_routed})")
                     else:
                         logger.debug(f"Skipped net '{name}' - only {len(net_pins)} pins")
                         
@@ -735,14 +740,16 @@ class KiCadInterface:
         """Generate airwires (ratsnest lines) for unrouted nets using minimum spanning tree"""
         airwires = []
         filtered_airwires = 0
+        partial_airwires = 0
         
         try:
             for net in nets:
                 net_name = net.get('name', '')
                 pins = net.get('pins', [])
                 is_routed = net.get('routed', False)
+                has_tracks = net.get('has_tracks', False)
                 
-                # Skip if routed or has copper plane connection
+                # Skip if fully routed or has copper plane connection
                 if is_routed or net_name in plane_nets:
                     if net_name in plane_nets:
                         filtered_airwires += 1
@@ -753,12 +760,18 @@ class KiCadInterface:
                 if len(pins) < 2:
                     continue
                 
+                # Generate airwires even for partially routed nets
+                if has_tracks and len(pins) > 2:
+                    partial_airwires += 1
+                    logger.debug(f"Generating airwires for partially routed net '{net_name}' ({len(pins)} pins)")
+                
                 # Generate minimum spanning tree for this net's pins
                 mst_airwires = self._generate_mst_airwires(pins, net_name)
                 airwires.extend(mst_airwires)
             
             logger.info(f"Generated {len(airwires)} airwires from {len(nets)} nets")
-            logger.info(f"Filtered out {filtered_airwires} nets with copper pours")
+            logger.info(f"  Including {partial_airwires} partially routed nets")
+            logger.info(f"  Filtered out {filtered_airwires} nets with copper pours")
             
         except Exception as e:
             logger.error(f"Error generating airwires: {e}")
