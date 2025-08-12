@@ -105,6 +105,48 @@ class KiCadInterface:
             self.connected = False
             return False
 
+    def get_board_filename(self) -> str:
+        """Get the current board filename using KiCad Python API"""
+        if not self.connected or not self.board:
+            logger.warning("Not connected to KiCad board")
+            return "Unknown"
+        
+        board = self.board
+        try:
+            # Try multiple methods to get the board filename
+            if hasattr(board, 'GetFileName') and board.GetFileName():
+                # Use KiCad Python API GetFileName method (preferred)
+                filename = board.GetFileName()
+            elif hasattr(board, 'filename') and board.filename:
+                filename = board.filename
+            elif hasattr(board, 'name') and board.name:
+                filename = board.name
+            elif hasattr(board, '_board') and hasattr(board._board, 'GetFileName'):
+                filename = board._board.GetFileName()
+            elif hasattr(board, 'board') and hasattr(board.board, 'GetFileName'):
+                filename = board.board.GetFileName()
+            elif hasattr(board, 'document') and board.document:
+                if hasattr(board.document, 'filename') and board.document.filename:
+                    filename = board.document.filename
+                elif hasattr(board.document, 'name') and board.document.name:
+                    filename = board.document.name
+                else:
+                    filename = "Unknown"
+            else:
+                filename = "Unknown"
+            
+            # If we got a full path, extract just the filename
+            if filename and filename != "Unknown" and ('\\' in filename or '/' in filename):
+                import os
+                filename = os.path.basename(filename)
+                
+            logger.info(f"Retrieved board filename: {filename}")
+            return filename
+            
+        except Exception as e:
+            logger.warning(f"Error getting board filename: {e}")
+            return "Unknown"
+
     def get_board_data(self) -> Dict:
         """Extract comprehensive board data from KiCad"""
         if not self.connected or not self.board:
@@ -113,7 +155,7 @@ class KiCadInterface:
 
         board = self.board
 
-        # File/name - Enhanced extraction
+        # File/name - Enhanced extraction using KiCad Python API
         filename = 'Untitled'
         try:
             # Try multiple methods to get the board filename
@@ -121,11 +163,19 @@ class KiCadInterface:
                 filename = board.name
             elif hasattr(board, 'filename') and board.filename:
                 filename = board.filename
+            elif hasattr(board, 'GetFileName') and board.GetFileName():
+                # Use KiCad Python API GetFileName method
+                filename = board.GetFileName()
             elif hasattr(board, 'document') and board.document:
                 if hasattr(board.document, 'name') and board.document.name:
                     filename = board.document.name
                 elif hasattr(board.document, 'filename') and board.document.filename:
                     filename = board.document.filename
+            # Try accessing underlying board object
+            elif hasattr(board, '_board') and hasattr(board._board, 'GetFileName'):
+                filename = board._board.GetFileName()
+            elif hasattr(board, 'board') and hasattr(board.board, 'GetFileName'):
+                filename = board.board.GetFileName()
             
             # If we got a full path, extract just the filename
             if filename and ('\\' in filename or '/' in filename):

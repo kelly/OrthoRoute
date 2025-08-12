@@ -38,9 +38,49 @@ def load_kicad_thermal_relief_data(kicad_interface) -> Optional[Dict[str, Any]]:
         logger.info(f"Found {len(zones)} zones, {len(pads)} pads, {len(vias)} vias")
         logger.info(f"Found {len(tracks)} tracks, {len(footprints)} footprints")
         
+        # Get board filename using the dedicated method
+        board_filename = "Unknown"
+        try:
+            # First try the dedicated filename method if available
+            if hasattr(kicad_interface, 'get_board_filename'):
+                board_filename = kicad_interface.get_board_filename()
+            
+            # Fallback to direct board access if needed
+            if board_filename == "Unknown":
+                # Try multiple methods to get the filename from the board
+                if hasattr(board, 'filename') and board.filename:
+                    board_filename = board.filename
+                elif hasattr(board, 'GetFileName') and board.GetFileName():
+                    board_filename = board.GetFileName()
+                elif hasattr(board, 'get_filename') and board.get_filename():
+                    board_filename = board.get_filename()
+                # Try accessing the underlying board object if available
+                elif hasattr(board, '_board') and hasattr(board._board, 'GetFileName'):
+                    board_filename = board._board.GetFileName()
+                # Try calling the KiCad native API if accessible
+                elif hasattr(board, 'board') and hasattr(board.board, 'GetFileName'):
+                    board_filename = board.board.GetFileName()
+                # Final attempt: check if board has direct access to pcbnew board
+                elif hasattr(board, 'GetBoard') and hasattr(board.GetBoard(), 'GetFileName'):
+                    pcb_board = board.GetBoard()
+                    board_filename = pcb_board.GetFileName()
+            
+            # Clean up the filename if we got one
+            if board_filename and board_filename != "Unknown":
+                import os
+                board_filename = os.path.basename(board_filename)
+                logger.info(f"Board filename: {board_filename}")
+            else:
+                logger.warning("Could not retrieve board filename")
+                
+        except Exception as e:
+            logger.warning(f"Error getting board filename: {e}")
+            board_filename = "Unknown"
+        
         # Build the data structure that the GUI expects
         board_data = {
-            'board_name': 'KiCad Board with Thermal Reliefs',
+            'board_name': board_filename if board_filename != "Unknown" else 'PCB Board',
+            'filename': board_filename,
             'bounds': (0, 0, 100, 100),  # Will be calculated properly
             'components': [],
             'pads': [],

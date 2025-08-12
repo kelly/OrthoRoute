@@ -893,11 +893,11 @@ def convert_board_data_for_gui(board_data: Dict[str, Any]) -> Dict[str, Any]:
                                                 
                                                 # Try direct iteration on outline (should be sequence of PolyLineNode)
                                                 if hasattr(outline, '__iter__'):
-                                    try:
-                                        for point_node in outline:
-                                            # Check if it's a PolyLineNode with .point attribute
-                                            if hasattr(point_node, 'point'):
-                                                point = point_node.point
+                                                    try:
+                                                        for point_node in outline:
+                                                            # Check if it's a PolyLineNode with .point attribute
+                                                            if hasattr(point_node, 'point'):
+                                                                point = point_node.point
                                                 if hasattr(point, 'x') and hasattr(point, 'y'):
                                                     polygon_points.append({
                                                         'x': float(getattr(point, 'x', 0)) / 1000000,
