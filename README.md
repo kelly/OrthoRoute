@@ -10,16 +10,17 @@
   </tr>
 </table>
 
-GPU-accelerated PCB autorouting plugin with real-time visualization and professional-grade capabilities.
+GPU-accelerated PCB autorouting plugin with advanced thermal relief visualization and professional-grade capabilities.
 
 ## Features
 
-- **GPU-Accelerated Routing**: Harness the power of modern graphics cards for ultra-fast routing
-- **Real-time Visualization**: Live routing progress with interactive 2D board view
+- **Thermal Relief Visualization**: Full visualization and processing of thermal relief patterns from KiCad's complex polygon data
+- **Exact Pad Shapes**: Uses KiCad's native `get_pad_shapes_as_polygons()` API for precise pad geometry
 - **KiCad IPC Integration**: Seamless communication with KiCad via modern IPC APIs
-- **Professional Interface**: Clean Qt6-based interface with routing controls and progress monitoring
-- **Multi-layer Support**: Handle complex multi-layer PCB designs
-- **Smart Algorithms**: Advanced pathfinding with obstacle avoidance and via optimization
+- **Real-time Visualization**: Interactive 2D board view with zoom, pan, and layer controls
+- **Professional Interface**: Clean PyQt6-based interface with KiCad color themes
+- **Multi-layer Support**: Handle complex multi-layer PCB designs with front/back copper visualization
+- **GPU-Accelerated Routing**: Future support for ultra-fast routing algorithms
 - **Manhattan Routing**: Where OrthoRoute gets its name. 
 
 ## Screenshots
@@ -30,6 +31,22 @@ GPU-accelerated PCB autorouting plugin with real-time visualization and professi
   <br>
   <em>The OrthoRoute plugin interface showing an unrouted <a href="https://jpralves.net/pages/cseduino-v4.html">CSEduino v4</a> board with airwires and board information panel.</em>
 </div>
+
+## Project Structure
+
+```
+OrthoRoute/
+├── src/                           # Core thermal relief plugin
+│   ├── orthoroute_plugin.py      # Main plugin entry point
+│   ├── thermal_relief_loader.py  # KiCad data extraction with thermal relief support
+│   ├── orthoroute_window.py      # PyQt6 GUI with thermal relief visualization
+│   ├── kicad_interface.py        # KiCad IPC API communication
+│   └── unused/                   # Legacy routing algorithms (for future development)
+├── debug/                         # Development and debugging files
+├── docs/                         # Documentation
+├── graphics/                     # Icons and screenshots
+└── tests/                        # Test files
+```
 
 ## Installation
 
@@ -52,74 +69,57 @@ python build.py --package production
 - **KiCad 9.0+** with IPC API support
 - **kipy** - KiCad IPC client library
 - **PyQt6** - GUI framework
-- **NumPy** - Array operations
 
 ### Optional Dependencies
-- **CuPy** - GPU acceleration (highly recommended)
-- **NVIDIA GPU** with CUDA support for best performance
+- **NumPy** - Array operations for future routing algorithms
+- **CuPy** - GPU acceleration for future development
 
 ## Usage
 
 1. Open your PCB project in KiCad
-2. Run the plugin from the command line:
+2. Run the thermal relief plugin from the command line:
    ```bash
    cd src
-   python orthoroute.py
+   python orthoroute_plugin.py
    ```
 3. The plugin will automatically connect to KiCad and analyze your board
-4. Use the routing controls to:
-   - Select nets to route
-   - Adjust routing parameters
-   - Monitor progress in real-time
-   - Apply routes back to KiCad
-
-## Project Structure
-
-```
-OrthoRoute/
-├── src/                       # Core application code
-│   ├── orthoroute.py         # Main plugin entry point ⭐
-│   ├── orthoroute_window.py   # Qt6 main interface
-│   ├── orthoroute_main.py     # Core routing logic
-│   ├── gpu_routing_engine.py  # GPU acceleration
-│   └── kicad_interface.py     # KiCad IPC integration
-├── graphics/                  # Icons and resources
-├── docs/                      # Documentation
-├── tests/                     # Test suite
-├── build.py                   # Unified build system
-└── requirements.txt           # Python dependencies
-```
+4. Use the visualization interface to:
+   - View thermal relief patterns embedded in copper pours
+   - Examine exact pad shapes from KiCad
+   - Toggle layer visibility (F.Cu/B.Cu)
+   - Zoom and pan around the PCB
 
 ## Building
 
-The project includes a unified build system that creates multiple package formats:
+The project includes build scripts for creating plugin packages:
 
 ```bash
-# Build all packages
+# Build KiCad plugin package
+python build_ipc_plugin.py
+
+# General build system (work in progress)
 python build.py
-
-# Build specific package
-python build.py --package production
-python build.py --package lite
-python build.py --package development
-
-# Clean build directory
-python build.py --clean
 ```
 
-### Package Types
+### Current Status
 
-- **Production** (`orthoroute-production`): Full-featured package with GPU acceleration and documentation
-- **Lite** (`orthoroute-lite`): Minimal package for basic routing functionality
-- **Development** (`orthoroute-dev`): Development build with debugging tools and tests
+- **Thermal Relief Plugin**: ✅ Fully functional with KiCad IPC integration
+- **GPU Routing**: 🚧 Future development (algorithms preserved in `src/unused/`)
+- **Plugin Packaging**: ✅ Available via build scripts
 
-## Performance
+## Current Capabilities
 
-OrthoRoute leverages GPU acceleration for exceptional performance:
+OrthoRoute currently excels at thermal relief visualization:
 
-- **CPU Routing**: Traditional algorithms for compatibility
-- **GPU Routing**: CUDA-accelerated pathfinding with 10-100x speedup
-- **Real-time Updates**: Live visualization of routing progress
+- **Thermal Relief Analysis**: Processes complex 5,505+ point polygon outlines from KiCad
+- **Exact Geometry**: Renders precise pad shapes using KiCad's native polygon API
+- **Real-time Visualization**: Interactive PCB viewer with zoom, pan, and layer controls
+- **KiCad Integration**: Direct IPC connection for live board data
+
+## Future Development
+
+- **GPU Routing**: CUDA-accelerated pathfinding algorithms (preserved in `src/unused/`)
+- **Advanced Algorithms**: Push-and-shove, differential pairs, design rule checking
 - **Memory Efficient**: Optimized for large PCB designs
 
 ## Stability

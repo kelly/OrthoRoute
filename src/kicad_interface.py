@@ -97,7 +97,7 @@ class KiCadInterface:
                         raise Exception("No board available through any method")
                     
             self.connected = True
-            logger.info("✅ Connected to KiCad IPC API and retrieved board")
+            logger.info("Connected to KiCad IPC API and retrieved board")
             return True
 
         except Exception as e:
