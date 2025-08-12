@@ -262,7 +262,8 @@ def load_kicad_thermal_relief_data(kicad_interface) -> Optional[Dict[str, Any]]:
                     'footprint_layer': 'F.Cu',
                     'drill_diameter': drill_diameter,
                     'number': str(pad.number),
-                    'net': str(pad.net.name) if pad.net else 'unconnected',
+                    'net': pad.net if pad.net else None,  # Store the complete net object
+                    'net_name': str(pad.net.name) if pad.net else 'unconnected',  # Keep name for display
                     'polygons': polygons  # Add exact polygon shapes from KiCad
                 }
                 board_data['pads'].append(pad_data)
@@ -533,6 +534,42 @@ def load_kicad_thermal_relief_data(kicad_interface) -> Optional[Dict[str, Any]]:
         padding = 5.0
         board_data['bounds'] = (min_x - padding, min_y - padding, max_x + padding, max_y + padding)
         logger.info(f"Board bounds: {board_data['bounds']}")
+        
+        # Extract nets for airwires
+        logger.info("Extracting nets for airwires...")
+        try:
+            nets = board.get_nets()
+            logger.info(f"Found {len(nets)} nets in board")
+            
+            for net in nets:
+                net_name = net.name
+                net_code = net.code
+                
+                # Skip special nets
+                if net_name in ['', 'unconnected', 'No Net']:
+                    continue
+                
+                # Count pads connected to this net
+                connected_pads = []
+                for pad in board_data['pads']:
+                    pad_net = pad.get('net')
+                    if pad_net and hasattr(pad_net, 'code') and pad_net.code == net_code:
+                        connected_pads.append(pad)
+                    elif isinstance(pad_net, dict) and pad_net.get('code') == net_code:
+                        connected_pads.append(pad)
+                
+                if len(connected_pads) >= 2:  # Only nets with 2+ pads need airwires
+                    board_data['nets'][net_name] = {
+                        'net_code': net_code,
+                        'pin_count': len(connected_pads),
+                        'routed': False  # Assume unrouted for now (could check if tracks exist)
+                    }
+                    logger.debug(f"  Net '{net_name}' (code {net_code}): {len(connected_pads)} pads")
+            
+            logger.info(f"Extracted {len(board_data['nets'])} nets with 2+ pads for airwires")
+            
+        except Exception as e:
+            logger.error(f"Error extracting nets: {e}")
         
         # Log success summary
         components = len(board_data['components'])
