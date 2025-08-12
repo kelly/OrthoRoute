@@ -13,6 +13,17 @@ import time
 logger = logging.getLogger(__name__)
 
 @dataclass
+class DRCRules:
+    """Container for Design Rule Check information"""
+    netclasses: Dict[str, Dict]  # netclass_name -> rules dict
+    default_track_width: float  # mm
+    default_via_size: float  # mm
+    default_via_drill: float  # mm
+    default_clearance: float  # mm
+    minimum_track_width: float  # mm
+    minimum_via_size: float  # mm
+
+@dataclass
 class BoardData:
     """Container for board data extracted from KiCad"""
     filename: str
@@ -25,6 +36,7 @@ class BoardData:
     vias: List[Dict]
     pads: List[Dict]
     bounds: Tuple[float, float, float, float]  # min_x, min_y, max_x, max_y
+    drc_rules: Optional[DRCRules] = None
 
 
 def _ipc_retry(func, desc: str, max_retries: int = 3, sleep_s: float = 0.5):
@@ -626,6 +638,10 @@ class KiCadInterface:
             
         except Exception as e:
             logger.error(f"Error getting nets: {e}")
+            # Initialize empty nets and debug data on error
+            nets = []
+            all_nets_debug = []
+            plane_nets = set()
 
         # Get board dimensions using computed bounds from all geometry
         # This is more reliable than trying to get dimensions from KiCad directly
@@ -701,9 +717,16 @@ class KiCadInterface:
         airwires = self._generate_airwires(nets, plane_nets)
         board_data['airwires'] = airwires
         
+        # Extract DRC rules
+        logger.info("Extracting DRC rules...")
+        drc_rules = self.extract_drc_rules()
+        board_data['drc_rules'] = drc_rules
+        
         logger.info(f"Extracted board data: {filename} ({width:.1f}x{height:.1f}mm, {copper_layers} copper layers)")
         logger.info(f"  {len(nets)} routable nets, {len(components)} components, {len(tracks)} tracks, {len(copper_zones)} zones")
         logger.info(f"  Generated {len(airwires)} airwires for visualization")
+        if drc_rules:
+            logger.info(f"  Extracted {len(drc_rules.netclasses)} netclasses with design rules")
         return board_data
 
     def _get_layer_count(self) -> int:
@@ -1172,8 +1195,202 @@ class KiCadInterface:
             logger.error(f"Error extracting pad polygons: {e}")
             return []
 
+    def extract_drc_rules(self) -> Optional[DRCRules]:
+        """Extract Design Rule Check information from KiCad board and project"""
+        if not self.board:
+            logger.error("No board connection available for DRC extraction")
+            return None
+            
+        try:
+            logger.info("🔍 Extracting DRC rules from KiCad...")
+            
+            # Get project for netclass information
+            project = _ipc_retry(self.board.get_project, "get_project")
+            
+            # Get all netclasses from project
+            netclasses_list = _ipc_retry(project.get_net_classes, "get_net_classes")
+            
+            # Convert netclasses to dict format
+            netclasses = {}
+            default_track_width = 0.2  # mm fallback
+            default_via_size = 0.8     # mm fallback
+            default_via_drill = 0.4    # mm fallback
+            default_clearance = 0.2    # mm fallback
+            minimum_track_width = 0.1  # mm fallback
+            minimum_via_size = 0.4     # mm fallback
+            
+            for netclass in netclasses_list:
+                try:
+                    # Extract netclass properties
+                    netclass_name = getattr(netclass, 'name', 'Default')
+                    
+                    # Try to extract design rule parameters
+                    rules = {
+                        'name': netclass_name,
+                        'track_width': 0.2,  # fallback
+                        'via_size': 0.8,     # fallback
+                        'via_drill': 0.4,    # fallback
+                        'clearance': 0.2,    # fallback
+                    }
+                    
+                    # Extract actual values if available
+                    # Note: NetClass properties may vary based on KiCad API version
+                    if hasattr(netclass, 'track_width'):
+                        rules['track_width'] = getattr(netclass, 'track_width', 0.2) / 1000000.0  # convert from nm to mm
+                    elif hasattr(netclass, 'TrackWidth'):
+                        rules['track_width'] = getattr(netclass, 'TrackWidth', 200000) / 1000000.0
+                        
+                    if hasattr(netclass, 'via_size'):
+                        rules['via_size'] = getattr(netclass, 'via_size', 0.8) / 1000000.0
+                    elif hasattr(netclass, 'ViaSize'):
+                        rules['via_size'] = getattr(netclass, 'ViaSize', 800000) / 1000000.0
+                        
+                    if hasattr(netclass, 'via_drill'):
+                        rules['via_drill'] = getattr(netclass, 'via_drill', 0.4) / 1000000.0
+                    elif hasattr(netclass, 'ViaDrill'):
+                        rules['via_drill'] = getattr(netclass, 'ViaDrill', 400000) / 1000000.0
+                        
+                    if hasattr(netclass, 'clearance'):
+                        rules['clearance'] = getattr(netclass, 'clearance', 0.2) / 1000000.0
+                    elif hasattr(netclass, 'Clearance'):
+                        rules['clearance'] = getattr(netclass, 'Clearance', 200000) / 1000000.0
+                    
+                    netclasses[netclass_name] = rules
+                    
+                    # Set defaults from "Default" netclass
+                    if netclass_name.lower() == 'default':
+                        default_track_width = rules['track_width']
+                        default_via_size = rules['via_size']
+                        default_via_drill = rules['via_drill']
+                        default_clearance = rules['clearance']
+                    
+                    logger.info(f"  NetClass '{netclass_name}': track={rules['track_width']:.3f}mm via={rules['via_size']:.3f}mm clearance={rules['clearance']:.3f}mm")
+                    
+                except Exception as e:
+                    logger.warning(f"Error processing netclass {getattr(netclass, 'name', 'Unknown')}: {e}")
+                    continue
+            
+            # Get additional constraints from board if available
+            try:
+                # Try to get board-level design rules
+                # This may not be available in all KiCad API versions
+                if hasattr(self.board, 'get_design_rules'):
+                    board_rules = self.board.get_design_rules()
+                    logger.info(f"Found board-level design rules: {board_rules}")
+                elif hasattr(self.board, 'GetDesignSettings'):
+                    design_settings = self.board.GetDesignSettings()
+                    logger.info(f"Found design settings: {design_settings}")
+            except Exception as e:
+                logger.debug(f"Board design rules not available: {e}")
+            
+            # Create DRC rules object
+            drc_rules = DRCRules(
+                netclasses=netclasses,
+                default_track_width=default_track_width,
+                default_via_size=default_via_size,
+                default_via_drill=default_via_drill,
+                default_clearance=default_clearance,
+                minimum_track_width=min(minimum_track_width, default_track_width * 0.5),
+                minimum_via_size=min(minimum_via_size, default_via_size * 0.5)
+            )
+            
+            logger.info(f"✅ Extracted DRC rules: {len(netclasses)} netclasses")
+            logger.info(f"   Default track width: {default_track_width:.3f}mm")
+            logger.info(f"   Default via size: {default_via_size:.3f}mm")
+            logger.info(f"   Default clearance: {default_clearance:.3f}mm")
+            
+            return drc_rules
+            
+        except Exception as e:
+            logger.error(f"Error extracting DRC rules: {e}")
+            logger.info("Will use fallback DRC rules")
+            
+            # Return fallback DRC rules
+            return DRCRules(
+                netclasses={'Default': {
+                    'name': 'Default',
+                    'track_width': 0.2,
+                    'via_size': 0.8,
+                    'via_drill': 0.4,
+                    'clearance': 0.2
+                }},
+                default_track_width=0.2,
+                default_via_size=0.8,
+                default_via_drill=0.4,
+                default_clearance=0.2,
+                minimum_track_width=0.1,
+                minimum_via_size=0.4
+            )
+
+    def get_net_constraints(self, net_name: str) -> Dict[str, float]:
+        """Get routing constraints for a specific net"""
+        if not self.board:
+            logger.error("No board connection available")
+            return {}
+            
+        try:
+            # Get nets and their netclass assignments
+            nets = _ipc_retry(self.board.get_nets, "get_nets")
+            target_net = None
+            
+            for net in nets:
+                if net.name == net_name:
+                    target_net = net
+                    break
+            
+            if not target_net:
+                logger.warning(f"Net '{net_name}' not found")
+                return {}
+            
+            # Get netclass for this net
+            netclass_mapping = _ipc_retry(lambda: self.board.get_netclass_for_nets([target_net]), "get_netclass_for_nets")
+            
+            if target_net in netclass_mapping:
+                netclass = netclass_mapping[target_net]
+                netclass_name = getattr(netclass, 'name', 'Default')
+                
+                # Extract constraints
+                constraints = {
+                    'netclass': netclass_name,
+                    'track_width': getattr(netclass, 'track_width', 200000) / 1000000.0,  # nm to mm
+                    'via_size': getattr(netclass, 'via_size', 800000) / 1000000.0,
+                    'via_drill': getattr(netclass, 'via_drill', 400000) / 1000000.0,
+                    'clearance': getattr(netclass, 'clearance', 200000) / 1000000.0
+                }
+                
+                logger.info(f"Net '{net_name}' constraints: {constraints}")
+                return constraints
+            
+        except Exception as e:
+            logger.error(f"Error getting constraints for net '{net_name}': {e}")
+        
+        # Return defaults
+        return {
+            'netclass': 'Default',
+            'track_width': 0.2,
+            'via_size': 0.8,
+            'via_drill': 0.4,
+            'clearance': 0.2
+        }
+
     def _get_fallback_board_data(self) -> Dict:
         """Fallback mock data if IPC connection fails"""
+        fallback_drc = DRCRules(
+            netclasses={'Default': {
+                'name': 'Default',
+                'track_width': 0.2,
+                'via_size': 0.8,
+                'via_drill': 0.4,
+                'clearance': 0.2
+            }},
+            default_track_width=0.2,
+            default_via_size=0.8,
+            default_via_drill=0.4,
+            default_clearance=0.2,
+            minimum_track_width=0.1,
+            minimum_via_size=0.4
+        )
+        
         return {
             'filename': 'Mock_Board.kicad_pcb',
             'width': 100.0,
@@ -1186,5 +1403,6 @@ class KiCadInterface:
             'pads': [],
             'bounds': (0.0, 0.0, 100.0, 80.0),
             'unrouted_count': 0,
-            'routed_count': 0
+            'routed_count': 0,
+            'drc_rules': fallback_drc
         }
