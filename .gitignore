@@ -18,6 +18,42 @@ var/
 wheels/
 *.egg-info/
 .installed.cfg
+*.egg
+
+# Temporary and test files
+test_*.py
+debug_*.py
+*_test.py
+*_summary.py
+*_improvements.py
+*_analysis.py
+validate_*.py
+demo_*.py
+comprehensive_*.py
+performance_*.py
+routing_quality_*.py
+enhanced_*.py
+final_*.py
+immediate_*.py
+simplified_*.py
+gpu_parallelization.py
+
+# Log files and temporary data
+*.log
+orthoroute.log
+*.tmp
+*.temp
+
+# Status and summary documents (keep in docs/)
+*_SUMMARY.md
+*_STATUS.md
+BUILD_LOG.md
+CLEANUP_SUMMARY.md
+DRC_EXTRACTION_SUMMARY.md
+PROJECT_CONSOLIDATION_SUMMARY.md
+PROJECT_STATUS.md
+PERFORMANCE_OPTIMIZATION_SUMMARY.md
+GPU_AUTOROUTER_STATUS.md
 
 # Development and testing temporary files
 development/testing/comprehensive_test_results.json
@@ -25,7 +61,6 @@ development/testing/headless_test_results.json
 development/testing/simple_kicad_test.py
 development/testing/test_pcbnew_import.py
 development/testing/test_orthoroute_imports.py
-*.egg
 
 # Virtual Environment
 .env

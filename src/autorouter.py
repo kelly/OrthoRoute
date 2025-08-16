@@ -742,6 +742,9 @@ class AutorouterEngine:
         total_cells = len(self.layers) * self.grid_config.width * self.grid_config.height
         density = (obstacle_count / total_cells) * 100
         
+        # Store density for timeout calculations
+        self._obstacle_density = density / 100.0  # Store as fraction (0.0-1.0)
+        
         logger.info(f"🚧 IPC-2221A Pathfinding Grid: {obstacle_count} obstacle cells out of {total_cells} total ({density:.1f}%)")
         
         if density > 15:
@@ -1563,7 +1566,7 @@ class AutorouterEngine:
         found_target = cp.zeros(num_layers, dtype=cp.bool_)
         
         for iteration in range(1, max_iterations):
-            if timeout > 0 and iteration % 100 == 0:  # Check timeout periodically
+            if timeout > 0 and iteration % 50 == 0:  # Check timeout more frequently
                 if time.time() > timeout:
                     logger.warning("⏱️ CUDA pathfinding timeout")
                     break
@@ -1861,7 +1864,17 @@ class AutorouterEngine:
         # Get nets to route
         nets = self.board_data.get('nets', {})
         logger.info(f"🔍 Raw nets data: {len(nets)} nets")
-        logger.debug(f"🔍 First few nets: {dict(list(nets.items())[:3])}")
+        logger.debug(f"🔍 Nets type: {type(nets)}")
+        
+        # Only call .items() if nets is actually a dictionary
+        if isinstance(nets, dict) and len(nets) > 0:
+            logger.debug(f"🔍 First few nets: {dict(list(nets.items())[:3])}")
+        elif isinstance(nets, list):
+            logger.debug(f"🔍 Nets is a list with {len(nets)} items")
+            if nets:
+                logger.debug(f"🔍 First net item: {nets[0]}")
+        else:
+            logger.debug(f"🔍 Unexpected nets type: {type(nets)}")
         
         # Also check for alternative net structures
         raw_nets = self.board_data.get('_raw_nets', {})
@@ -2015,9 +2028,39 @@ class AutorouterEngine:
         logger.info(f"🔧 Built {len(nets)} nets from {len(airwires)} airwires")
         return nets
     
-    def _filter_routable_nets(self, nets: Dict) -> Dict:
+    def _filter_routable_nets(self, nets) -> Dict:
         """Filter nets that can and should be routed"""
         logger.info(f"🔍 Filtering nets: received {len(nets)} nets")
+        
+        # Ensure nets is a dictionary
+        if isinstance(nets, list):
+            logger.info("🔄 Converting nets list to dictionary format")
+            nets_dict = {}
+            for i, net_data in enumerate(nets):
+                logger.debug(f"🔍 Processing net list item {i}: {type(net_data)} - {net_data}")
+                if isinstance(net_data, dict) and 'name' in net_data:
+                    net_name = net_data['name']
+                    # Ensure net_code is available
+                    if 'net_code' not in net_data and 'id' in net_data:
+                        net_data['net_code'] = net_data['id']
+                    nets_dict[net_name] = net_data
+                elif hasattr(net_data, 'name'):
+                    # Handle KiCad API Net objects
+                    net_name = net_data.name
+                    net_code = getattr(net_data, 'code', getattr(net_data, 'net_code', 0))
+                    nets_dict[net_name] = {
+                        'name': net_name,
+                        'net_code': net_code
+                    }
+                    logger.debug(f"🔧 Converted net object: {net_name} -> code {net_code}")
+                else:
+                    logger.debug(f"Skipping invalid net data: {net_data}")
+            nets = nets_dict
+            logger.info(f"🔧 Converted {len(nets)} nets from list to dictionary")
+        elif not isinstance(nets, dict):
+            logger.error(f"Invalid nets type: {type(nets)}")
+            return {}
+        
         logger.debug(f"🔍 Net names: {list(nets.keys())[:10]}")  # Show first 10 net names
         
         routable = {}
@@ -2123,15 +2166,18 @@ class AutorouterEngine:
         # Try routing with rip-up and retry - ADJUSTED for multi-pad nets
         max_attempts = 1  # Keep at 1 for performance
         
-        # DYNAMIC TIMEOUT: Scale with net complexity
-        if len(pads) >= 6:  # Complex multi-pad nets (6+ pads)
-            route_timeout = 15.0  # Much longer timeout for complex nets
-        elif len(pads) >= 3:  # Medium multi-pad nets (3-5 pads)  
-            route_timeout = 8.0   # Longer timeout for multi-pad nets
-        else:  # Simple 2-pad nets
-            route_timeout = 2.0   # Quick timeout for simple nets
+        # DYNAMIC TIMEOUT: Scale with net complexity AND obstacle density
+        obstacle_density = getattr(self, '_obstacle_density', 0.0)
+        density_multiplier = 1.0 + (obstacle_density * 2.0)  # Up to 3x longer for very dense boards
         
-        logger.debug(f"🕐 {net_name}: {len(pads)} pads, timeout = {route_timeout:.1f}s")
+        if len(pads) >= 6:  # Complex multi-pad nets (6+ pads)
+            route_timeout = 25.0 * density_multiplier  # Much longer timeout for complex nets
+        elif len(pads) >= 3:  # Medium multi-pad nets (3-5 pads)  
+            route_timeout = 12.0 * density_multiplier   # Longer timeout for multi-pad nets
+        else:  # Simple 2-pad nets
+            route_timeout = 5.0 * density_multiplier   # Reasonable timeout for simple nets
+        
+        logger.debug(f"🕐 {net_name}: {len(pads)} pads, density={obstacle_density:.1%}, timeout = {route_timeout:.1f}s")
         
         for attempt in range(max_attempts):
             logger.debug(f"🔄 Routing {net_name} - attempt {attempt + 1}/{max_attempts}")

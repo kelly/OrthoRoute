@@ -9,15 +9,30 @@ import logging
 import time
 import numpy as np
 import math
+import sys
+import os
 from abc import ABC, abstractmethod
 from typing import Dict, List, Tuple, Optional, Any, Set
 from dataclasses import dataclass
 from enum import Enum
 
-from core.drc_rules import DRCRules
-from core.gpu_manager import GPUManager
-from core.board_interface import BoardInterface
-from data_structures.grid_config import GridConfig
+# Add src directory to Python path for direct execution
+current_dir = os.path.dirname(os.path.abspath(__file__))
+src_dir = os.path.dirname(current_dir)
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
+
+# Try absolute imports first, fall back to relative
+try:
+    from core.drc_rules import DRCRules
+    from core.gpu_manager import GPUManager
+    from core.board_interface import BoardInterface
+    from data_structures.grid_config import GridConfig
+except ImportError:
+    from ..core.drc_rules import DRCRules
+    from ..core.gpu_manager import GPUManager
+    from ..core.board_interface import BoardInterface
+    from ..data_structures.grid_config import GridConfig
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +217,11 @@ class BaseRouter(ABC):
             
             # Skip already routed nets
             if net_data['routed']:
+                continue
+            
+            # Skip nets that have copper planes (GND, power planes, etc.)
+            if self._is_plane_connected_net(net_name):
+                logger.info(f"⚡ Skipping '{net_name}' - connected via copper plane")
                 continue
             
             # Update progress
@@ -430,6 +450,20 @@ class BaseRouter(ABC):
         
         overall_density = (total_obstacles / total_cells) * 100 if total_cells > 0 else 0
         logger.info(f"🚧 Total: {total_obstacles} obstacles across {len(self.layers)} layers ({overall_density:.1f}% density)")
+    
+    def _is_plane_connected_net(self, net_name: str) -> bool:
+        """Check if a net is connected via copper planes (should not be routed)"""
+        # Check if the board interface has copper zone information
+        if hasattr(self.board_interface, 'get_all_zones'):
+            zones = self.board_interface.get_all_zones()
+            for zone in zones:
+                zone_net = zone.get('net', '')
+                if zone_net == net_name:
+                    return True
+        
+        # Common plane-connected net names
+        plane_nets = {'GND', 'GROUND', '+5V', '+3V3', '+12V', '-12V', 'VCC', 'VDD', 'VSS'}
+        return net_name.upper() in plane_nets
     
     def get_routing_statistics(self) -> RoutingStats:
         """Get current routing statistics"""

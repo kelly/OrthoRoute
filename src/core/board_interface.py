@@ -7,10 +7,22 @@ for accessing PCB geometry data across all routing algorithms.
 """
 import logging
 import math
+import sys
+import os
 from typing import Dict, List, Tuple, Optional, Set, Any
 import numpy as np
 
-from data_structures.grid_config import GridConfig
+# Add src directory to Python path for direct execution
+current_dir = os.path.dirname(os.path.abspath(__file__))
+src_dir = os.path.dirname(current_dir)
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
+
+# Try absolute imports first, fall back to relative
+try:
+    from data_structures.grid_config import GridConfig
+except ImportError:
+    from ..data_structures.grid_config import GridConfig
 
 logger = logging.getLogger(__name__)
 

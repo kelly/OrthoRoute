@@ -8,14 +8,30 @@ Extends the base router interface with Lee's specific pathfinding methodology.
 import logging
 import time
 import math
+import sys
+import os
 from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
 
-from routing_engines.base_router import BaseRouter, RoutingResult, RouteSegment, RoutingStats
-from core.drc_rules import DRCRules
-from core.gpu_manager import GPUManager
-from core.board_interface import BoardInterface
-from data_structures.grid_config import GridConfig
+# Add src directory to Python path for direct execution
+current_dir = os.path.dirname(os.path.abspath(__file__))
+src_dir = os.path.dirname(current_dir)
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
+
+# Try absolute imports first, fall back to relative
+try:
+    from routing_engines.base_router import BaseRouter, RoutingResult, RouteSegment, RoutingStats
+    from core.drc_rules import DRCRules
+    from core.gpu_manager import GPUManager
+    from core.board_interface import BoardInterface
+    from data_structures.grid_config import GridConfig
+except ImportError:
+    from .base_router import BaseRouter, RoutingResult, RouteSegment, RoutingStats
+    from ..core.drc_rules import DRCRules
+    from ..core.gpu_manager import GPUManager
+    from ..core.board_interface import BoardInterface
+    from ..data_structures.grid_config import GridConfig
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +54,13 @@ class LeeRouter(BaseRouter):
         
         # Lee's algorithm specific configuration
         self.max_iterations = 10000  # Maximum wavefront expansion iterations
-        self.neighbor_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1)]  # 4-connected neighbors
+        # 8-connected neighbors for 45-degree routing (horizontal, vertical, and diagonal)
+        self.neighbor_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1),  # orthogonal
+                                (-1, -1), (-1, 1), (1, -1), (1, 1)]   # diagonal
         
         logger.info("🌊 Lee's Algorithm Router initialized")
         logger.info(f"   Max iterations: {self.max_iterations}")
-        logger.info(f"   Connectivity: 4-connected neighbors")
+        logger.info(f"   Connectivity: 8-connected neighbors (45° routing enabled)")
     
     def route_net(self, net_name: str, timeout: float = 10.0) -> RoutingResult:
         """Route a complete net using Lee's algorithm"""
@@ -243,10 +261,16 @@ class LeeRouter(BaseRouter):
             # Expand wavefront
             next_wave = self._expand_wavefront_gpu(current_wave, obstacle_grid, distance_grid, wave_distance + 1)
             
-            # Check if expansion is stuck
+            # Check if expansion is stuck - use efficient method to avoid GPU sync
             if self.gpu_manager.is_gpu_enabled():
-                if cp.sum(next_wave) == 0:
-                    break
+                # Use more efficient check - avoid cp.sum() which can cause sync
+                # Check if any new cells were added by comparing wave size
+                if hasattr(next_wave, 'any'):
+                    if not next_wave.any():  # More efficient than sum() > 0
+                        break
+                else:
+                    if cp.sum(next_wave) == 0:
+                        break
             else:
                 if np.sum(next_wave) == 0:
                     break
@@ -262,10 +286,10 @@ class LeeRouter(BaseRouter):
         
         if self.gpu_manager.is_gpu_enabled():
             # GPU implementation using binary dilation
-            # Create structuring element for 4-connected neighbors
-            structure = cp.array([[0, 1, 0], 
+            # Create structuring element for 8-connected neighbors (45° routing)
+            structure = cp.array([[1, 1, 1], 
                                  [1, 1, 1], 
-                                 [0, 1, 0]], dtype=cp.bool_)
+                                 [1, 1, 1]], dtype=cp.bool_)
             
             # Dilate current wave
             from cupyx.scipy.ndimage import binary_dilation
@@ -282,10 +306,10 @@ class LeeRouter(BaseRouter):
             # CPU implementation
             from scipy.ndimage import binary_dilation
             
-            # Create structuring element for 4-connected neighbors
-            structure = np.array([[0, 1, 0], 
+            # Create structuring element for 8-connected neighbors (45° routing)
+            structure = np.array([[1, 1, 1], 
                                  [1, 1, 1], 
-                                 [0, 1, 0]], dtype=bool)
+                                 [1, 1, 1]], dtype=bool)
             
             # Dilate current wave
             expanded = binary_dilation(current_wave, structure=structure, iterations=1)
@@ -302,39 +326,80 @@ class LeeRouter(BaseRouter):
                        end: Tuple[int, int]) -> List[Tuple[int, int]]:
         """Backtrace from end to start to find optimal path"""
         
-        # Convert to CPU for backtracing if needed
-        if hasattr(distance_grid, 'get'):
-            distance_grid_cpu = distance_grid.get()
-        else:
-            distance_grid_cpu = distance_grid
+    def _backtrace_path(self, distance_grid, start: Tuple[int, int], 
+                       end: Tuple[int, int]) -> List[Tuple[int, int]]:
+        """Backtrace from end to start to find optimal path"""
         
+        # Optimize GPU-CPU transfers by processing small regions at a time
         path = []
         current = end
         
-        while current != start:
-            path.append(current)
-            
-            # Find neighbor with lowest distance
-            cx, cy = current
-            best_distance = float('inf')
-            best_neighbor = None
-            
-            for dx, dy in self.neighbor_offsets:
-                nx, ny = cx + dx, cy + dy
+        # Keep backtracing on GPU if possible to avoid expensive full grid transfer
+        if self.gpu_manager.is_gpu_enabled() and hasattr(distance_grid, 'get'):
+            # Process backtrace in small chunks to minimize GPU-CPU transfers
+            while current != start:
+                path.append(current)
                 
-                if (0 <= nx < distance_grid_cpu.shape[1] and 
-                    0 <= ny < distance_grid_cpu.shape[0] and
-                    distance_grid_cpu[ny, nx] >= 0):
+                # Get small local region around current position (3x3 neighborhood)
+                cx, cy = current
+                min_x, max_x = max(0, cx-1), min(distance_grid.shape[1], cx+2)
+                min_y, max_y = max(0, cy-1), min(distance_grid.shape[0], cy+2)
+                
+                # Transfer only this tiny region (9 cells max vs entire grid)
+                local_region = distance_grid[min_y:max_y, min_x:max_x].get()
+                local_cx, local_cy = cx - min_x, cy - min_y
+                
+                # Find best neighbor in local region
+                best_distance = float('inf')
+                best_neighbor = None
+                
+                for dx, dy in self.neighbor_offsets:
+                    nx_local, ny_local = local_cx + dx, local_cy + dy
                     
-                    if distance_grid_cpu[ny, nx] < best_distance:
-                        best_distance = distance_grid_cpu[ny, nx]
-                        best_neighbor = (nx, ny)
-            
-            if best_neighbor is None:
-                logger.error("❌ Lee's backtrace failed - no valid path")
-                return []
-            
-            current = best_neighbor
+                    if (0 <= nx_local < local_region.shape[1] and 
+                        0 <= ny_local < local_region.shape[0] and
+                        local_region[ny_local, nx_local] >= 0):
+                        
+                        if local_region[ny_local, nx_local] < best_distance:
+                            best_distance = local_region[ny_local, nx_local]
+                            best_neighbor = (cx + dx, cy + dy)
+                
+                if best_neighbor is None:
+                    logger.error("❌ Lee's backtrace failed - no valid path")
+                    return []
+                
+                current = best_neighbor
+        else:
+            # CPU fallback - convert once if needed
+            if hasattr(distance_grid, 'get'):
+                distance_grid_cpu = distance_grid.get()
+            else:
+                distance_grid_cpu = distance_grid
+                
+            while current != start:
+                path.append(current)
+                
+                # Find neighbor with lowest distance
+                cx, cy = current
+                best_distance = float('inf')
+                best_neighbor = None
+                
+                for dx, dy in self.neighbor_offsets:
+                    nx, ny = cx + dx, cy + dy
+                    
+                    if (0 <= nx < distance_grid_cpu.shape[1] and 
+                        0 <= ny < distance_grid_cpu.shape[0] and
+                        distance_grid_cpu[ny, nx] >= 0):
+                        
+                        if distance_grid_cpu[ny, nx] < best_distance:
+                            best_distance = distance_grid_cpu[ny, nx]
+                            best_neighbor = (nx, ny)
+                
+                if best_neighbor is None:
+                    logger.error("❌ Lee's backtrace failed - no valid path")
+                    return []
+                
+                current = best_neighbor
         
         path.append(start)
         path.reverse()
@@ -518,16 +583,21 @@ class LeeRouter(BaseRouter):
         for layer in self.layers:
             grid = self.obstacle_grids[layer]
             
-            # Convert to CPU if needed
-            grid_cpu = self.gpu_manager.to_cpu(grid) if hasattr(grid, 'get') else grid
+            # Optimize GPU usage - avoid full grid transfer for density calculation
+            if self.gpu_manager.is_gpu_enabled() and hasattr(grid, 'get'):
+                # Only transfer the small region of interest instead of entire grid
+                region_gpu = grid[min_gy:max_gy+1, min_gx:max_gx+1]
+                region_cpu = region_gpu.get()  # Much smaller transfer
+                density = np.sum(region_cpu) / region_cpu.size if region_cpu.size > 0 else 0
+            else:
+                # CPU case - direct region access
+                grid_cpu = self.gpu_manager.to_cpu(grid) if hasattr(grid, 'get') else grid
+                region = grid_cpu[min_gy:max_gy+1, min_gx:max_gx+1]
+                density = np.sum(region) / region.size if region.size > 0 else 0
             
-            # Calculate obstacle density in region
-            region = grid_cpu[min_gy:max_gy+1, min_gx:max_gx+1]
-            if region.size > 0:
-                density = np.sum(region) / region.size
-                if density < min_density:
-                    min_density = density
-                    best_layer = layer
+            if density < min_density:
+                min_density = density
+                best_layer = layer
         
         logger.debug(f"🎯 Selected {best_layer} for routing (density: {min_density:.3f})")
         return best_layer
@@ -568,17 +638,21 @@ class LeeRouter(BaseRouter):
     
     def _path_to_route_segments(self, path: List[Tuple[int, int]], layer: str, 
                                net_name: str, net_constraints: Dict) -> List[RouteSegment]:
-        """Convert grid path to route segments"""
+        """Convert grid path to optimized route segments"""
         
         if len(path) < 2:
             return []
         
+        # First, optimize the path by removing unnecessary intermediate points
+        optimized_path = self._optimize_path_for_routing(path)
+        
         segments = []
         trace_width = net_constraints.get('trace_width', self.drc_rules.default_trace_width)
         
-        for i in range(len(path) - 1):
-            gx1, gy1 = path[i]
-            gx2, gy2 = path[i + 1]
+        # Create segments between key waypoints only (not every grid cell)
+        for i in range(len(optimized_path) - 1):
+            gx1, gy1 = optimized_path[i]
+            gx2, gy2 = optimized_path[i + 1]
             
             # Convert to world coordinates
             x1, y1 = self.grid_config.grid_to_world(gx1, gy1)
@@ -597,7 +671,48 @@ class LeeRouter(BaseRouter):
             
             segments.append(segment)
         
+        logger.debug(f"🎯 Path optimization: {len(path)} grid points → {len(optimized_path)} waypoints → {len(segments)} segments")
         return segments
+    
+    def _optimize_path_for_routing(self, path: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+        """Optimize path by removing unnecessary waypoints and creating efficient segments"""
+        
+        if len(path) < 3:
+            return path
+        
+        optimized = [path[0]]  # Always keep start point
+        
+        for i in range(1, len(path) - 1):
+            prev_point = optimized[-1]
+            current_point = path[i]
+            next_point = path[i + 1]
+            
+            # Check if we can skip this point (if it's on a straight line)
+            if not self._is_path_change_significant(prev_point, current_point, next_point):
+                continue  # Skip this intermediate point
+            
+            # This is a significant direction change - keep it
+            optimized.append(current_point)
+        
+        optimized.append(path[-1])  # Always keep end point
+        
+        return optimized
+    
+    def _is_path_change_significant(self, prev: Tuple[int, int], current: Tuple[int, int], 
+                                   next_point: Tuple[int, int]) -> bool:
+        """Determine if a path point represents a significant direction change"""
+        
+        # Calculate direction vectors
+        dx1, dy1 = current[0] - prev[0], current[1] - prev[1]
+        dx2, dy2 = next_point[0] - current[0], next_point[1] - current[1]
+        
+        # If directions are the same (collinear), this point can be skipped
+        # For 45-degree routing, we want to preserve diagonal vs orthogonal changes
+        if (dx1, dy1) == (dx2, dy2):
+            return False  # Same direction - can skip
+        
+        # Different directions - this is a significant waypoint
+        return True
     
     def _exclude_net_pads_from_obstacles(self, obstacle_grid, layer: str, net_name: str):
         """Remove current net's pads from obstacle grid to allow routing to them"""
