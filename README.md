@@ -40,8 +40,9 @@ _Testing / examples are the following_:
 - [RP2040 Minimal board](https://datasheets.raspberrypi.com/rp2040/Minimal-KiCAD.zip)
 
 ### Main Interface
+
 <div align="center">
-  <img src="graphics/screenshots/Screencap1-cseduino4.png" alt="OrthoRoute Interface" width="800">
+  <img src="graphics/screenshots/Screencap1-rpi.png" alt="OrthoRoute Interface" width="800">
   <br>
   <em>OrthoRoute plugin showing real-time PCB visualization with airwires and routing analysis</em>
 </div>
