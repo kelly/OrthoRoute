@@ -18,6 +18,8 @@ from typing import Dict, List, Tuple, Optional, Any, Set
 from pathlib import Path
 import time
 
+print("🔧 DEBUG: autorouter.py loaded with debug modifications")
+
 try:
     import cupy as cp
     HAS_CUPY = True
@@ -28,6 +30,23 @@ except ImportError:
     cp = None
     logger = logging.getLogger(__name__)
     logger.info("💻 CuPy not available - using CPU fallback")
+
+# Import sparse grid optimization
+try:
+    from sparse_grid_optimizer import SparseGridOptimizer, SparseLeeWavefront
+    HAS_SPARSE_OPTIMIZATION = True
+    logger.info("🚀 Sparse grid optimization enabled")
+except ImportError:
+    try:
+        import sys
+        import os
+        sys.path.append(os.path.dirname(__file__))
+        from sparse_grid_optimizer import SparseGridOptimizer, SparseLeeWavefront
+        HAS_SPARSE_OPTIMIZATION = True
+        logger.info("🚀 Sparse grid optimization enabled (local path)")
+    except ImportError:
+        HAS_SPARSE_OPTIMIZATION = False
+        logger.info("⚠️ Sparse grid optimization not available")
 
 logger = logging.getLogger(__name__)
 
@@ -608,6 +627,15 @@ class AutorouterEngine:
         self.obstacle_grids = {}
         self.distance_grids = {}
         
+        # 🚀 Initialize sparse grid optimizer for GPU performance
+        if self.use_gpu and HAS_SPARSE_OPTIMIZATION:
+            self.sparse_optimizer = SparseGridOptimizer()
+            self.sparse_pathfinder = SparseLeeWavefront(self.sparse_optimizer)
+            logger.info("🚀 Sparse grid optimization initialized for GPU acceleration")
+        else:
+            self.sparse_optimizer = None
+            self.sparse_pathfinder = None
+        
         # Performance optimization: Cache pad-to-net mappings
         self._pad_net_cache = {}
         self._build_pad_net_cache()
@@ -742,9 +770,6 @@ class AutorouterEngine:
         total_cells = len(self.layers) * self.grid_config.width * self.grid_config.height
         density = (obstacle_count / total_cells) * 100
         
-        # Store density for timeout calculations
-        self._obstacle_density = density / 100.0  # Store as fraction (0.0-1.0)
-        
         logger.info(f"🚧 IPC-2221A Pathfinding Grid: {obstacle_count} obstacle cells out of {total_cells} total ({density:.1f}%)")
         
         if density > 15:
@@ -756,104 +781,354 @@ class AutorouterEngine:
             logger.info(f"✅ Low obstacle density ({density:.1f}%) - optimal for pathfinding algorithms")
     
     def _mark_pads_as_obstacles(self, obstacle_grid, layer: str, exclude_net: str = None, net_constraints: Dict = None):
-        """Mark pads as obstacles using KiCad 9's proper clearance hierarchy with EDGE-TO-EDGE clearance"""
+        """
+        FREE ROUTING SPACE: Use thermal relief polygons to define safe routing areas
+        
+        Instead of manually calculating clearances, we use KiCad's thermal relief system
+        which already defines exactly where copper can and cannot exist around pads.
+        This eliminates double-clearance application and reduces obstacle density.
+        """
         pads = self.board_data.get('pads', [])
         marked_count = 0
         excluded_count = 0
-        layer_checked_count = 0
         
-        # Performance optimization: Pre-filter pads by layer compatibility
-        layer_pads = []
+        # Check if we have thermal relief/copper pour data available
+        copper_pours = self.board_data.get('copper_pours', [])
+        has_thermal_relief_data = len(copper_pours) > 0
+        
+        logger.info(f"� FREE ROUTING SPACE: Marking obstacles on {layer}")
+        logger.info(f"   Thermal relief data available: {has_thermal_relief_data}")
+        if exclude_net:
+            logger.info(f"   Excluding net: {exclude_net}")
+        
+        if has_thermal_relief_data:
+            # Use Free Routing Space approach with thermal reliefs
+            marked_count = self._mark_obstacles_using_thermal_reliefs(
+                obstacle_grid, layer, exclude_net, net_constraints
+            )
+        else:
+            # Fallback to minimal clearance approach (legacy compatibility)
+            marked_count = self._mark_obstacles_minimal_clearance(
+                obstacle_grid, layer, exclude_net, net_constraints
+            )
+        
+    def _mark_pads_as_obstacles(self, obstacle_grid, layer: str, exclude_net: str = None, net_constraints: Dict = None):
+        """
+        FREE ROUTING SPACE: Generate virtual copper pour to define safe routing areas
+        
+        This creates a virtual copper pour that defines where traces can be routed,
+        similar to how KiCad's copper pour algorithm works but generated algorithmically
+        from DRC rules rather than using existing thermal relief polygons.
+        """
+        
+        # Use the Virtual Copper Generator to create free routing space
+        marked_count = self._generate_free_routing_space_obstacles(obstacle_grid, layer, exclude_net, net_constraints)
+        
+        logger.info(f"🌟 FREE ROUTING SPACE: Generated {marked_count} obstacle cells on {layer}")
+        
+        return marked_count
+    
+    def _mark_obstacles_using_thermal_reliefs(self, obstacle_grid, layer: str, exclude_net: str = None, net_constraints: Dict = None):
+        """
+        FREE ROUTING SPACE: Use thermal relief polygons to define routing obstacles
+        
+        This method uses KiCad's thermal relief system as the definitive source of
+        where routing can and cannot occur, eliminating manual clearance calculations.
+        """
+        pads = self.board_data.get('pads', [])
+        copper_pours = self.board_data.get('copper_pours', [])
+        marked_count = 0
+        
+        # Convert layer name to layer ID for copper pour matching
+        layer_id = self._get_layer_id(layer)
+        
+        # Find copper pours that affect this layer
+        relevant_pours = []
+        for pour in copper_pours:
+            filled_polygons = pour.get('filled_polygons', {})
+            if str(layer_id) in filled_polygons:
+                relevant_pours.append(pour)
+        
+        logger.info(f"   Found {len(relevant_pours)} copper pours affecting {layer}")
+        
+        # For each pad, check if it has thermal relief (keepout) areas
         for i, pad in enumerate(pads):
             pad_layers = pad.get('layers', [])
             
-            # Check if pad is on this layer
-            # For through-hole pads, they exist on both F.Cu and B.Cu
-            is_on_layer = (layer in pad_layers or 
-                          (not pad_layers and pad.get('drill_diameter', 0) > 0) or  # Through-hole with empty layers
-                          ('F.Cu' in pad_layers and 'B.Cu' in pad_layers))  # Through-hole explicit
-            
-            if is_on_layer:
-                layer_pads.append((i, pad))
-                layer_checked_count += 1
-        
-        # Get routing constraints for the current net
-        routing_net_name = exclude_net  # The net we're currently routing
-        trace_width = net_constraints.get('trace_width', self.drc_rules.default_trace_width) if net_constraints else self.drc_rules.default_trace_width
-        
-        logger.info(f"🎯 KiCad 9 Clearance: Marking obstacles with proper clearance hierarchy on {layer}")
-        logger.info(f"   Routing net: {routing_net_name}, track width: {trace_width:.3f}mm")
-        
-        # Process only relevant pads
-        for i, pad in layer_pads:
-            # Skip pads on the current net to preserve connectivity
-            pad_net = pad.get('net', {})
-            pad_net_name = ""
-            pad_uuid = pad.get('uuid', f'pad_{i}')  # Get pad UUID for clearance calculation
-            
-            # Handle different net object types efficiently
-            if hasattr(pad_net, 'name'):
-                pad_net_name = pad_net.name
-            elif isinstance(pad_net, dict):
-                pad_net_name = pad_net.get('name', '')
-            elif isinstance(pad_net, str):
-                pad_net_name = pad_net
-            
-            if exclude_net and pad_net_name == exclude_net:
-                excluded_count += 1
+            # Skip if pad is not on this layer
+            if not self._is_pad_on_layer(pad, layer):
                 continue
             
-            # CRITICAL: Calculate proper clearance using KiCad 9 hierarchy
-            # This simulates the clearance between this pad and our future track
-            required_clearance = self._calculate_pad_track_clearance(
-                pad_uuid, pad_net_name, routing_net_name, trace_width
-            )
+            # Skip pads on the current net (preserve connectivity)
+            pad_net_name = self._get_pad_net_name(pad)
+            if exclude_net and pad_net_name == exclude_net:
+                continue
             
-            # EDGE-TO-EDGE CLEARANCE: Total obstacle zone = pad_radius + clearance + track_radius
+            # Use thermal relief areas around this pad as obstacles
+            thermal_obstacles = self._get_thermal_relief_obstacles(pad, layer_id, relevant_pours)
+            
+            # Mark thermal relief areas as obstacles in the grid
+            for obstacle_area in thermal_obstacles:
+                marked_count += self._mark_polygon_as_obstacle(obstacle_grid, obstacle_area)
+        
+        # If no thermal relief data, mark just the pad itself as minimal obstacle
+        if marked_count == 0:
+            marked_count = self._mark_pads_minimal_obstacles(obstacle_grid, layer, exclude_net)
+        
+        return marked_count
+    
+    def _mark_obstacles_minimal_clearance(self, obstacle_grid, layer: str, exclude_net: str = None, net_constraints: Dict = None):
+        """
+        Fallback method: Use minimal clearances when thermal relief data is not available
+        
+        This creates much smaller obstacle zones than the previous double-clearance approach.
+        """
+        pads = self.board_data.get('pads', [])
+        marked_count = 0
+        
+        # Use minimal clearance (just track width, no extra padding)
+        trace_width = net_constraints.get('trace_width', self.drc_rules.default_trace_width) if net_constraints else self.drc_rules.default_trace_width
+        minimal_clearance = trace_width * 0.5  # Just half a track width for basic separation
+        
+        logger.info(f"   Using minimal clearance fallback: {minimal_clearance:.3f}mm")
+        
+        for i, pad in enumerate(pads):
+            if not self._is_pad_on_layer(pad, layer):
+                continue
+            
+            pad_net_name = self._get_pad_net_name(pad)
+            if exclude_net and pad_net_name == exclude_net:
+                continue
+            
+            # Mark minimal obstacle zone around pad
             pad_x, pad_y = pad.get('x', 0), pad.get('y', 0)
             size_x, size_y = pad.get('size_x', 1.0), pad.get('size_y', 1.0)
             
-            # Calculate total obstacle zone with edge-to-edge clearance
-            pad_radius_x = size_x / 2
-            pad_radius_y = size_y / 2
-            track_radius = trace_width / 2
+            # Minimal obstacle radius = pad radius + minimal clearance
+            obstacle_radius_x = (size_x / 2) + minimal_clearance
+            obstacle_radius_y = (size_y / 2) + minimal_clearance
             
-            obstacle_radius_x = pad_radius_x + required_clearance + track_radius
-            obstacle_radius_y = pad_radius_y + required_clearance + track_radius
-            
-            # Grid coordinates with proper bounds
-            grid_x = int((pad_x - self.grid_config.min_x) / self.grid_config.resolution)
-            grid_y = int((pad_y - self.grid_config.min_y) / self.grid_config.resolution)
-                
-            # Convert obstacle radius to grid cells - ALWAYS ROUND UP to preserve clearance
-            import math
-            half_size_x_cells = max(1, math.ceil(obstacle_radius_x / self.grid_config.resolution))
-            half_size_y_cells = max(1, math.ceil(obstacle_radius_y / self.grid_config.resolution))
-            
-            # Mark the pad obstacle zone
-            cells_marked_this_pad = 0
-            for dx in range(-half_size_x_cells, half_size_x_cells + 1):
-                for dy in range(-half_size_y_cells, half_size_y_cells + 1):
-                    x, y = grid_x + dx, grid_y + dy
-                    if 0 <= x < obstacle_grid.shape[1] and 0 <= y < obstacle_grid.shape[0]:
-                        if obstacle_grid[y, x] == 0:  # Only mark clear cells
-                            obstacle_grid[y, x] = 1
-                            cells_marked_this_pad += 1
-                            marked_count += 1
-            
-            # Debug log for first few pads
-            if i < 5:  # Limit debug output
-                logger.debug(f"   Pad {i}: {pad_net_name} clearance={required_clearance:.3f}mm, "
-                           f"obstacle_zone=({obstacle_radius_x:.3f}, {obstacle_radius_y:.3f})mm, "
-                           f"cells={cells_marked_this_pad}")
-        
-        total_cells = obstacle_grid.shape[0] * obstacle_grid.shape[1]
-        density = (marked_count / total_cells) * 100 if total_cells > 0 else 0
-        
-        logger.info(f"🎯 KiCad 9 Clearance: Marked {marked_count} obstacle cells with proper clearance hierarchy on {layer}")
-        logger.info(f"🎯 Density: {density:.1f}% | Excluded: {excluded_count} | Layer-relevant: {layer_checked_count}")
+            # Mark obstacle cells
+            cells_marked = self._mark_circular_obstacle(
+                obstacle_grid, pad_x, pad_y, obstacle_radius_x, obstacle_radius_y
+            )
+            marked_count += cells_marked
         
         return marked_count
+    
+    def _generate_free_routing_space_obstacles(self, obstacle_grid, layer: str, exclude_net: str = None, net_constraints: Dict = None):
+        """
+        Generate free routing space by creating a virtual copper pour algorithm
+        
+        This reverses the KiCad copper pour process:
+        1. Start with full board as routable space  
+        2. Subtract keepout areas around pads using DRC rules
+        3. Subtract existing tracks and vias
+        4. The result defines where new traces can be routed
+        """
+        height, width = obstacle_grid.shape
+        
+        # Step 1: Create virtual copper pour (start with all routable)
+        virtual_copper_grid = np.ones((height, width), dtype=bool)
+        
+        # Step 2: Apply board outline constraints (if available)
+        virtual_copper_grid = self._apply_virtual_board_outline(virtual_copper_grid)
+        
+        # Step 3: Apply pad keepout zones using DRC rules
+        virtual_copper_grid = self._apply_virtual_pad_keepouts(virtual_copper_grid, layer, exclude_net, net_constraints)
+        
+        # Step 4: Apply existing track obstacles  
+        virtual_copper_grid = self._apply_virtual_track_obstacles(virtual_copper_grid, layer)
+        
+        # Step 5: Apply via obstacles
+        virtual_copper_grid = self._apply_virtual_via_obstacles(virtual_copper_grid, layer)
+        
+        # Step 6: Convert virtual copper pour to obstacle grid
+        # Where virtual_copper_grid is False (non-routable), mark as obstacle
+        marked_count = 0
+        for y in range(height):
+            for x in range(width):
+                if not virtual_copper_grid[y, x]:  # Not routable = obstacle
+                    if obstacle_grid[y, x] == 0:  # Only mark clear cells
+                        obstacle_grid[y, x] = 1
+                        marked_count += 1
+        
+        # Log the virtual copper pour statistics
+        routable_cells = np.sum(virtual_copper_grid)
+        total_cells = height * width
+        routable_percentage = (routable_cells / total_cells) * 100
+        obstacle_percentage = ((total_cells - routable_cells) / total_cells) * 100
+        
+        logger.info(f"🌟 Virtual Copper Pour for {layer}:")
+        logger.info(f"   Routable area: {routable_cells}/{total_cells} cells ({routable_percentage:.1f}%)")
+        logger.info(f"   Obstacle area: {total_cells - routable_cells}/{total_cells} cells ({obstacle_percentage:.1f}%)")
+        
+        return marked_count
+    
+    def _apply_virtual_board_outline(self, virtual_copper_grid):
+        """Apply board outline constraints to virtual copper pour"""
+        # For now, use full grid (board outline extraction would be complex)
+        # This could be enhanced to read board outline from KiCad
+        return virtual_copper_grid
+    
+    def _apply_virtual_pad_keepouts(self, virtual_copper_grid, layer: str, exclude_net: str = None, net_constraints: Dict = None):
+        """Apply keepout zones around pads using DRC rules - this is the key step"""
+        pads = self.board_data.get('pads', [])
+        height, width = virtual_copper_grid.shape
+        
+        # Get routing constraints
+        trace_width = net_constraints.get('trace_width', self.drc_rules.default_trace_width) if net_constraints else self.drc_rules.default_trace_width
+        
+        logger.info(f"🔧 Applying virtual pad keepouts for {layer} (track width: {trace_width:.3f}mm)")
+        if exclude_net:
+            logger.info(f"   Excluding net: {exclude_net}")
+        
+        keepouts_applied = 0
+        pads_excluded = 0
+        
+        # DIAGNOSTIC: Log first few pads for debugging
+        diagnostic_count = 0
+        
+        for i, pad in enumerate(pads):
+            # Skip if pad is not on this layer
+            if not self._is_pad_on_layer(pad, layer):
+                continue
+            
+            # Skip pads on the current net (preserve connectivity)
+            pad_net_name = self._get_pad_net_name(pad)
+            if exclude_net and pad_net_name == exclude_net:
+                pads_excluded += 1
+                if diagnostic_count < 3:
+                    logger.info(f"   🚫 EXCLUDING pad {i} at ({pad.get('x', 0):.1f},{pad.get('y', 0):.1f}) net={pad_net_name}")
+                    diagnostic_count += 1
+                continue
+            
+            # Calculate DRC-compliant keepout zone around pad
+            pad_x, pad_y = pad.get('x', 0), pad.get('y', 0)
+            size_x, size_y = pad.get('size_x', 1.0), pad.get('size_y', 1.0)
+            
+            # Get proper clearance using DRC hierarchy
+            pad_uuid = pad.get('uuid', f'pad_{i}')
+            required_clearance = self._calculate_pad_track_clearance(
+                pad_uuid, pad_net_name, exclude_net or "routing_track", trace_width
+            )
+            
+            # Virtual copper pour keepout = pad size + clearance + track width/2
+            # This ensures the CENTER of a track can't get closer than clearance to pad edge
+            keepout_radius_x = (size_x / 2) + required_clearance + (trace_width / 2)
+            keepout_radius_y = (size_y / 2) + required_clearance + (trace_width / 2)
+            
+            # Mark keepout area in virtual copper grid
+            self._mark_virtual_keepout_zone(virtual_copper_grid, pad_x, pad_y, keepout_radius_x, keepout_radius_y)
+            keepouts_applied += 1
+            
+            if diagnostic_count < 3:
+                logger.info(f"   ✅ APPLIED keepout {keepouts_applied} for pad {i} at ({pad_x:.1f},{pad_y:.1f}) "
+                            f"radius=({keepout_radius_x:.2f},{keepout_radius_y:.2f})mm net={pad_net_name}")
+                diagnostic_count += 1
+        
+        logger.info(f"   Applied {keepouts_applied} keepouts, excluded {pads_excluded} pads from net {exclude_net}")
+        
+        return virtual_copper_grid
+    
+    def _apply_virtual_track_obstacles(self, virtual_copper_grid, layer: str):
+        """Apply existing tracks as obstacles in virtual copper pour"""
+        tracks = self.board_data.get('tracks', [])
+        
+        for track in tracks:
+            # Check if track is on this layer
+            track_layer = track.get('layer', 0)
+            if not self._track_on_layer(track_layer, layer):
+                continue
+            
+            # Mark track area as non-routable
+            start_x, start_y = track.get('start_x', 0), track.get('start_y', 0)
+            end_x, end_y = track.get('end_x', 0), track.get('end_y', 0) 
+            width = track.get('width', 0.2)
+            
+            self._mark_virtual_track_area(virtual_copper_grid, start_x, start_y, end_x, end_y, width)
+        
+        return virtual_copper_grid
+    
+    def _apply_virtual_via_obstacles(self, virtual_copper_grid, layer: str):
+        """Apply vias as obstacles in virtual copper pour"""
+        vias = self.board_data.get('vias', [])
+        
+        for via in vias:
+            # Vias affect all layers
+            via_x, via_y = via.get('x', 0), via.get('y', 0)
+            via_diameter = via.get('via_diameter', 0.6)
+            
+            # Mark via keepout area
+            keepout_radius = (via_diameter / 2) + self.drc_rules.min_trace_spacing
+            self._mark_virtual_keepout_zone(virtual_copper_grid, via_x, via_y, keepout_radius, keepout_radius)
+        
+        return virtual_copper_grid
+    
+    def _mark_virtual_keepout_zone(self, virtual_copper_grid, center_x: float, center_y: float, radius_x: float, radius_y: float):
+        """Mark a keepout zone in the virtual copper grid"""
+        height, width = virtual_copper_grid.shape
+        
+        # Convert to grid coordinates
+        grid_x = int((center_x - self.grid_config.min_x) / self.grid_config.resolution)
+        grid_y = int((center_y - self.grid_config.min_y) / self.grid_config.resolution)
+        
+        # Calculate grid cell radius
+        import math
+        half_size_x_cells = max(1, math.ceil(radius_x / self.grid_config.resolution))
+        half_size_y_cells = max(1, math.ceil(radius_y / self.grid_config.resolution))
+        
+        # Mark elliptical keepout area
+        for dx in range(-half_size_x_cells, half_size_x_cells + 1):
+            for dy in range(-half_size_y_cells, half_size_y_cells + 1):
+                x, y = grid_x + dx, grid_y + dy
+                if 0 <= x < width and 0 <= y < height:
+                    # Check if point is inside ellipse
+                    norm_dx = dx / half_size_x_cells if half_size_x_cells > 0 else 0
+                    norm_dy = dy / half_size_y_cells if half_size_y_cells > 0 else 0
+                    if (norm_dx * norm_dx + norm_dy * norm_dy) <= 1.0:
+                        virtual_copper_grid[y, x] = False  # Not routable
+    
+    def _mark_virtual_track_area(self, virtual_copper_grid, start_x: float, start_y: float, end_x: float, end_y: float, width: float):
+        """Mark existing track area as non-routable in virtual copper grid"""
+        # Simple implementation: mark track endpoints and interpolate
+        # A more sophisticated implementation would mark the full track corridor
+        
+        # Mark start and end points with track width
+        radius = width / 2
+        self._mark_virtual_keepout_zone(virtual_copper_grid, start_x, start_y, radius, radius)
+        self._mark_virtual_keepout_zone(virtual_copper_grid, end_x, end_y, radius, radius)
+        
+        # For now, simple approach - full track area marking would require line rasterization
+    
+    def _track_on_layer(self, track_layer_id: int, layer_name: str) -> bool:
+        """Check if track layer ID corresponds to the layer name"""
+        layer_map = {'F.Cu': 0, 'B.Cu': 31}  # Adjust based on actual KiCad layer mapping
+        return track_layer_id == layer_map.get(layer_name, 0)
+    
+    def _is_pad_on_layer(self, pad: Dict, layer: str) -> bool:
+        """Check if pad exists on the specified layer"""
+        pad_layers = pad.get('layers', [])
+        
+        # For through-hole pads, they exist on both F.Cu and B.Cu
+        is_on_layer = (layer in pad_layers or 
+                      (not pad_layers and pad.get('drill_diameter', 0) > 0) or  # Through-hole with empty layers
+                      ('F.Cu' in pad_layers and 'B.Cu' in pad_layers))  # Through-hole explicit
+        
+        return is_on_layer
+    
+    def _get_pad_net_name(self, pad: Dict) -> str:
+        """Extract net name from pad data"""
+        pad_net = pad.get('net', {})
+        
+        if hasattr(pad_net, 'name'):
+            return pad_net.name
+        elif isinstance(pad_net, dict):
+            return pad_net.get('name', '')
+        elif isinstance(pad_net, str):
+            return pad_net
+        
+        return ""
     
     def _calculate_pad_track_clearance(self, pad_uuid: str, pad_net_name: str, track_net_name: str, track_width: float) -> float:
         """Calculate clearance between a pad and track using KiCad 9's clearance hierarchy"""
@@ -875,6 +1150,13 @@ class AutorouterEngine:
                    f"pad={pad_clearance:.3f}mm, track_net={track_clearance:.3f}mm → {final_clearance:.3f}mm")
         
         return final_clearance
+    
+    def _mark_zones_as_obstacles(self, obstacle_grid, layer: str):
+        """Mark existing zones/copper pours as obstacles"""
+        # For now, zones are not marked as obstacles since we're using virtual copper pour
+        # In a more sophisticated implementation, this would mark filled zones
+        # that are not part of the current net
+        pass
     
     def validate_route_with_ipc2221a(self, route_segments: List[Dict], net_name: str) -> Dict:
         """
@@ -1020,6 +1302,8 @@ class AutorouterEngine:
     
     def _exclude_net_pads_from_obstacles(self, obstacle_grid, layer: str, net_name: str):
         """Remove current net's pads from obstacle grid to allow routing to them"""
+        print(f"🧹 DEBUG ENTRY: _exclude_net_pads_from_obstacles called for net '{net_name}' on {layer}")
+        
         # Find pads for this net using the cached mapping
         if net_name in self._pad_net_cache:
             net_pad_indices = self._pad_net_cache[net_name]
@@ -1027,6 +1311,7 @@ class AutorouterEngine:
             excluded_count = 0
             
             logger.debug(f"🧹 Clearing {len(net_pad_indices)} pads for net '{net_name}' on {layer}")
+            print(f"🧹 DEBUG: Clearing {len(net_pad_indices)} pads for net '{net_name}' on {layer}")
             
             for pad_idx in net_pad_indices:
                 if pad_idx >= len(pads):
@@ -1043,21 +1328,32 @@ class AutorouterEngine:
                 if not is_on_layer:
                     continue
                 
-                # Clear obstacle cells for this pad using SAME edge-to-edge clearance as marking
+                # Clear obstacle cells for this pad using SAME clearance calculation as virtual copper pour
                 pad_x, pad_y = pad.get('x', 0), pad.get('y', 0)
                 size_x, size_y = pad.get('size_x', 1.0), pad.get('size_y', 1.0)
                 
+                # Use the SAME clearance calculation as virtual copper pour
+                pad_uuid = pad.get('uuid', f'pad_{pad_idx}')
+                pad_net_name = self._get_pad_net_name(pad)
+                trace_width = self.drc_rules.default_trace_width
+                
+                # Calculate the EXACT same clearance as virtual copper pour
+                required_clearance = self._calculate_pad_track_clearance(
+                    pad_uuid, pad_net_name, net_name, trace_width
+                )
+                
+                # Virtual copper pour keepout = pad size + clearance + track width/2
+                keepout_radius_x = (size_x / 2) + required_clearance + (trace_width / 2)
+                keepout_radius_y = (size_y / 2) + required_clearance + (trace_width / 2)
+                
+                # Convert to grid coordinates 
                 grid_x = int((pad_x - self.grid_config.min_x) / self.grid_config.resolution)
                 grid_y = int((pad_y - self.grid_config.min_y) / self.grid_config.resolution)
                 
-                # Use the SAME edge-to-edge clearance calculation as _mark_pads_as_obstacles
-                trace_width = self.drc_rules.default_trace_width
-                pathfinding_clearance = self.drc_rules.pathfinding_clearance
-                effective_clearance = pathfinding_clearance + (trace_width / 2)
-                # Convert clearance to grid cells - ROUND UP to preserve clearance
+                # Convert keepout radius to grid cells - EXACTLY matching virtual copper pour
                 import math
-                half_size_x_cells = max(1, math.ceil((size_x / 2 + effective_clearance) / self.grid_config.resolution))
-                half_size_y_cells = max(1, math.ceil((size_y / 2 + effective_clearance) / self.grid_config.resolution))
+                half_size_x_cells = max(1, math.ceil(keepout_radius_x / self.grid_config.resolution))
+                half_size_y_cells = max(1, math.ceil(keepout_radius_y / self.grid_config.resolution))
                 
                 cells_cleared_this_pad = 0
                 for dx in range(-half_size_x_cells, half_size_x_cells + 1):
@@ -1070,9 +1366,10 @@ class AutorouterEngine:
                                 excluded_count += 1
                 
                 if excluded_count <= 20:  # Debug first few clearances
-                    logger.debug(f"  ✅ CLEARED PAD {pad_idx}: ({pad_x:.2f}, {pad_y:.2f}) = {cells_cleared_this_pad} cells (edge-to-edge: {effective_clearance:.3f}mm)")
+                    logger.debug(f"  ✅ CLEARED PAD {pad_idx}: ({pad_x:.2f}, {pad_y:.2f}) = {cells_cleared_this_pad} cells (keepout: {keepout_radius_x:.3f}mm)")
+                    print(f"  ✅ DEBUG CLEARED PAD {pad_idx}: ({pad_x:.2f}, {pad_y:.2f}) = {cells_cleared_this_pad} cells (keepout: {keepout_radius_x:.3f}mm)")
             
-            logger.debug(f"🧹 TOTAL: Cleared {excluded_count} obstacle cells for {net_name} pads on {layer} ({len(net_pad_indices)} pads) with edge-to-edge clearance")
+            logger.debug(f"🧹 TOTAL: Cleared {excluded_count} obstacle cells for {net_name} pads on {layer} ({len(net_pad_indices)} pads) with virtual copper pour clearance")
         else:
             logger.debug(f"⚠️ Net {net_name} not found in pad cache for exclusion on {layer}")
     
@@ -1437,18 +1734,41 @@ class AutorouterEngine:
         logger.debug(f"   World coords: ({src_x:.2f}, {src_y:.2f}) → ({tgt_x:.2f}, {tgt_y:.2f})")
         
         # 🚀 CUDA PARALLEL PATHFINDING: Try ALL layers at once!
+        # RE-ENABLED: Fixed sparse grid optimization should handle Free Routing Space complexity
         if self.use_gpu:
             return self._cuda_parallel_multi_layer_pathfind(source_pad, target_pad, net_name, net_constraints, net_obstacle_grids, timeout, start_time)
         
         # Fallback: Try specified layer only (CPU mode)
         temp_obstacle_grid = net_obstacle_grids[layer]
         
-        # Debug obstacle status at source and target
+        # 🔍 ENHANCED DEBUG: Check if pad exclusion worked correctly
         obstacles_cpu = temp_obstacle_grid
         src_blocked = obstacles_cpu[src_gy, src_gx] if (0 <= src_gx < self.grid_config.width and 0 <= src_gy < self.grid_config.height) else True
         tgt_blocked = obstacles_cpu[tgt_gy, tgt_gx] if (0 <= tgt_gx < self.grid_config.width and 0 <= tgt_gy < self.grid_config.height) else True
         
-        logger.debug(f"   Grid obstacles: Source={'BLOCKED' if src_blocked else 'clear'}, Target={'BLOCKED' if tgt_blocked else 'clear'}")
+        logger.debug(f"🔍 PAD ACCESSIBILITY DEBUG for {net_name}:")
+        logger.debug(f"   Source: ({src_gx}, {src_gy}) = {'BLOCKED' if src_blocked else 'CLEAR'}")
+        logger.debug(f"   Target: ({tgt_gx}, {tgt_gy}) = {'BLOCKED' if tgt_blocked else 'CLEAR'}")
+        
+        # If source or target is blocked, the pad exclusion failed!
+        if src_blocked or tgt_blocked:
+            logger.warning(f"🚨 PAD EXCLUSION FAILED for {net_name} on {layer}!")
+            logger.warning(f"   Source pad BLOCKED: {src_blocked}, Target pad BLOCKED: {tgt_blocked}")
+            logger.warning(f"   This indicates that _exclude_net_pads_from_obstacles() did not work properly")
+            
+            # Force clear the exact pad locations as emergency fallback
+            logger.warning(f"🩹 EMERGENCY PAD CLEARING for {net_name}")
+            if src_blocked and 0 <= src_gx < temp_obstacle_grid.shape[1] and 0 <= src_gy < temp_obstacle_grid.shape[0]:
+                temp_obstacle_grid[src_gy, src_gx] = 0
+                logger.warning(f"   ✅ Force-cleared source pad at ({src_gx}, {src_gy})")
+            if tgt_blocked and 0 <= tgt_gx < temp_obstacle_grid.shape[1] and 0 <= tgt_gy < temp_obstacle_grid.shape[0]:
+                temp_obstacle_grid[tgt_gy, tgt_gx] = 0
+                logger.warning(f"   ✅ Force-cleared target pad at ({tgt_gx}, {tgt_gy})")
+        else:
+            logger.debug(f"✅ Both pads are accessible for {net_name} on {layer}")
+        
+        logger.debug(f"   Grid bounds check: Source in bounds: {0 <= src_gx < self.grid_config.width and 0 <= src_gy < self.grid_config.height}")
+        logger.debug(f"   Grid bounds check: Target in bounds: {0 <= tgt_gx < self.grid_config.width and 0 <= tgt_gy < self.grid_config.height}")
         
         # Perform Lee's algorithm wavefront expansion with timeout
         path = self._lee_algorithm_with_timeout(src_gx, src_gy, tgt_gx, tgt_gy, layer, temp_obstacle_grid, timeout, start_time, net_constraints)
@@ -1483,6 +1803,7 @@ class AutorouterEngine:
         # Prepare obstacle grids for all layers on GPU
         gpu_obstacle_grids = []
         layer_mapping = {}
+        sparse_grids = {}  # Store sparse representations
         
         for i, layer in enumerate(available_layers):
             if layer in net_obstacle_grids:
@@ -1496,6 +1817,12 @@ class AutorouterEngine:
                 
                 gpu_obstacle_grids.append(gpu_grid)
                 layer_mapping[i] = layer
+                
+                # 🚀 SPARSE OPTIMIZATION: Compress each layer's obstacle grid
+                if self.sparse_optimizer:
+                    sparse_grid = self.sparse_optimizer.compress_obstacle_grid(gpu_grid, layer)
+                    sparse_grids[layer] = sparse_grid
+                
             else:
                 logger.warning(f"⚠️ Layer {layer} not found in obstacle grids")
         
@@ -1507,49 +1834,173 @@ class AutorouterEngine:
         stacked_grids = cp.stack(gpu_obstacle_grids, axis=0)
         num_layers = stacked_grids.shape[0]
         
+        # DEBUG: GPU memory usage analysis
+        total_cells = stacked_grids.size
+        memory_mb = (stacked_grids.nbytes / 1024 / 1024)
+        free_cells = cp.sum(stacked_grids == 0)  # Count free routing cells
+        obstacle_ratio = (total_cells - free_cells) / total_cells * 100
+        
+        logger.debug(f"🚀 GPU Memory Analysis:")
+        logger.debug(f"   Grid shape: {stacked_grids.shape}")
+        logger.debug(f"   Total cells: {total_cells:,}")
+        logger.debug(f"   Memory usage: {memory_mb:.1f}MB")
+        logger.debug(f"   Free routing cells: {free_cells:,} ({100-obstacle_ratio:.1f}%)")
+        logger.debug(f"   Obstacle density: {obstacle_ratio:.1f}%")
+        
+        # 🚀 Display sparse compression results
+        if self.sparse_optimizer and sparse_grids:
+            logger.debug(self.sparse_optimizer.get_compression_report())
+        
         logger.debug(f"🚀 Parallel pathfinding on {num_layers} layers: {stacked_grids.shape}")
         
-        # CUDA KERNEL: Run Lee's algorithm on ALL layers simultaneously
-        try:
-            best_paths = self._cuda_multi_layer_lee_algorithm(
-                stacked_grids, src_gx, src_gy, tgt_gx, tgt_gy, 
-                timeout - (time.time() - start_time)
+        # 🚀 SPARSE PATHFINDING: Use sparse algorithm if available
+        if self.sparse_pathfinder and sparse_grids:
+            return self._sparse_multi_layer_pathfind(
+                sparse_grids, src_gx, src_gy, tgt_gx, tgt_gy, 
+                layer_mapping, net_name, timeout - (time.time() - start_time)
+            )
+        else:
+            # CUDA KERNEL: Run Lee's algorithm on ALL layers simultaneously
+            try:
+                best_paths = self._cuda_multi_layer_lee_algorithm(
+                    stacked_grids, src_gx, src_gy, tgt_gx, tgt_gy, 
+                    timeout - (time.time() - start_time)
+                )
+                
+                # Evaluate all paths and pick the best one
+                best_path = None
+                best_layer = None
+                best_score = float('inf')
+                
+                for layer_idx, path in enumerate(best_paths):
+                    if path is not None and len(path) > 0:
+                        # Score based on path length (shorter is better)
+                        score = len(path)
+                        layer_name = layer_mapping.get(layer_idx, f"Layer_{layer_idx}")
+                        
+                        logger.debug(f"   Layer {layer_name}: path length = {len(path)} (score: {score})")
+                        
+                        if score < best_score:
+                            best_score = score
+                            best_path = path
+                            best_layer = layer_name
+                
+                if best_path is not None:
+                    logger.debug(f"🏆 Best route found on {best_layer} with length {len(best_path)}")
+                    
+                    # Add path to solution
+                    self._add_path_to_solution(best_path, best_layer, net_name, net_constraints)
+                    
+                    logger.debug(f"✅ Successfully routed {net_name} on {best_layer} using parallel pathfinding")
+                    return True
+                else:
+                    logger.debug(f"❌ No valid paths found on any layer for {net_name}")
+                    return False
+                    
+            except Exception as e:
+                logger.error(f"❌ CUDA parallel pathfinding failed: {e}")
+                # Fall back to single-layer sequential routing
+                return self._fallback_sequential_routing(source_pad, target_pad, available_layers, net_name, net_constraints, net_obstacle_grids, timeout, start_time)
+    
+    def _sparse_multi_layer_pathfind(self, sparse_grids: Dict, src_gx: int, src_gy: int, tgt_gx: int, tgt_gy: int, 
+                                   layer_mapping: Dict, net_name: str, timeout: float) -> bool:
+        """🚀 SPARSE PATHFINDING: Route using compressed sparse grids for maximum GPU efficiency"""
+        logger.debug(f"🚀 Sparse multi-layer pathfinding for {net_name}")
+        
+        best_path = None
+        best_layer = None
+        best_score = float('inf')
+        
+        for layer_name, sparse_grid in sparse_grids.items():
+            logger.debug(f"🌊 Attempting sparse pathfinding on layer {layer_name}")
+            
+            # Find source and target positions in sparse grid
+            free_positions = sparse_grid['free_positions']
+            
+            # Convert grid coordinates to actual positions for lookup
+            src_pos = (src_gy, src_gx)  # Note: y, x order for numpy indexing
+            tgt_pos = (tgt_gy, tgt_gx)
+            
+            # Find closest free cells to source and target
+            src_idx = self._find_closest_free_cell(src_pos, free_positions)
+            tgt_idx = self._find_closest_free_cell(tgt_pos, free_positions)
+            
+            if src_idx is None or tgt_idx is None:
+                logger.debug(f"⚠️ Source or target not accessible on layer {layer_name}")
+                continue
+            
+            # Run sparse Lee's wavefront algorithm
+            path = self.sparse_pathfinder.find_path_sparse(
+                sparse_grid, src_idx, tgt_idx, timeout
             )
             
-            # Evaluate all paths and pick the best one
-            best_path = None
-            best_layer = None
-            best_score = float('inf')
+            if path is not None and len(path) > 0:
+                score = len(path)
+                logger.debug(f"   Layer {layer_name}: sparse path length = {len(path)} (score: {score})")
+                
+                if score < best_score:
+                    best_score = score
+                    best_path = path
+                    best_layer = layer_name
+        
+        if best_path is not None:
+            logger.debug(f"🏆 Best sparse route found on {best_layer} with length {len(best_path)}")
             
-            for layer_idx, path in enumerate(best_paths):
-                if path is not None and len(path) > 0:
-                    # Score based on path length (shorter is better)
-                    score = len(path)
-                    layer_name = layer_mapping.get(layer_idx, f"Layer_{layer_idx}")
-                    
-                    logger.debug(f"   Layer {layer_name}: path length = {len(path)} (score: {score})")
-                    
-                    if score < best_score:
-                        best_score = score
-                        best_path = path
-                        best_layer = layer_name
+            # Add path to solution (convert back to world coordinates)
+            self._add_sparse_path_to_solution(best_path, best_layer, net_name)
             
-            if best_path is not None:
-                logger.debug(f"🏆 Best route found on {best_layer} with length {len(best_path)}")
-                
-                # Add path to solution
-                self._add_path_to_solution(best_path, best_layer, net_name, net_constraints)
-                
-                logger.debug(f"✅ Successfully routed {net_name} on {best_layer} using parallel pathfinding")
-                return True
-            else:
-                logger.debug(f"❌ No valid paths found on any layer for {net_name}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"❌ CUDA parallel pathfinding failed: {e}")
-            # Fall back to single-layer sequential routing
-            return self._fallback_sequential_routing(source_pad, target_pad, available_layers, net_name, net_constraints, net_obstacle_grids, timeout, start_time)
+            logger.debug(f"✅ Successfully routed {net_name} on {best_layer} using sparse pathfinding")
+            return True
+        else:
+            logger.debug(f"❌ No valid sparse paths found on any layer for {net_name}")
+            return False
+    
+    def _find_closest_free_cell(self, target_pos: Tuple[int, int], free_positions) -> Optional[int]:
+        """Find the index of the closest free cell to a target position"""
+        if len(free_positions) == 0:
+            return None
+        
+        # Calculate distances to all free cells
+        distances = cp.sum((free_positions - cp.array(target_pos)) ** 2, axis=1)
+        closest_idx = int(cp.argmin(distances))
+        
+        # Check if the closest cell is reasonably close (within 5 grid units)
+        min_distance = float(cp.sqrt(distances[closest_idx]))
+        if min_distance > 5.0:
+            logger.debug(f"⚠️ Closest free cell is {min_distance:.1f} grid units away")
+        
+        return closest_idx
+    
+    def _add_sparse_path_to_solution(self, path: List[Tuple[int, int]], layer: str, net_name: str):
+        """Convert sparse path coordinates back to world coordinates and add to solution"""
+        logger.debug(f"🛤️ Adding sparse path to solution: {len(path)} waypoints on {layer}")
+        
+        # Convert grid coordinates to world coordinates
+        world_path = []
+        for grid_y, grid_x in path:
+            world_x, world_y = self.grid_config.grid_to_world(grid_x, grid_y)
+            world_path.append((world_x, world_y))
+        
+        # Create track segments between consecutive waypoints
+        for i in range(len(world_path) - 1):
+            start_x, start_y = world_path[i]
+            end_x, end_y = world_path[i + 1]
+            
+            track = {
+                'start': {'x': start_x, 'y': start_y},
+                'end': {'x': end_x, 'y': end_y},
+                'layer': layer,
+                'width': self.drc_rules.default_trace_width,
+                'net': net_name
+            }
+            
+            self.routed_tracks.append(track)
+            
+            # Real-time track callback for UI updates
+            if self.track_callback:
+                self.track_callback(track)
+        
+        logger.debug(f"✅ Added {len(world_path)-1} track segments for {net_name}")
     
     def _cuda_multi_layer_lee_algorithm(self, stacked_grids, src_x: int, src_y: int, tgt_x: int, tgt_y: int, timeout: float) -> List:
         """CUDA implementation of Lee's algorithm running on multiple layers in parallel"""
@@ -1566,7 +2017,7 @@ class AutorouterEngine:
         found_target = cp.zeros(num_layers, dtype=cp.bool_)
         
         for iteration in range(1, max_iterations):
-            if timeout > 0 and iteration % 50 == 0:  # Check timeout more frequently
+            if timeout > 0 and iteration % 100 == 0:  # Check timeout periodically
                 if time.time() > timeout:
                     logger.warning("⏱️ CUDA pathfinding timeout")
                     break
@@ -1856,7 +2307,7 @@ class AutorouterEngine:
         
         return marked_count
     
-    def route_all_nets(self) -> bool:
+    def route_all_nets(self, timeout_per_net: float = 5.0, total_timeout: float = 300.0) -> dict:
         """Route all nets using Lee's algorithm with GPU acceleration"""
         start_time = time.time()
         logger.info("🚀 Starting DRC-aware autorouting with Lee's algorithm")
@@ -1864,17 +2315,30 @@ class AutorouterEngine:
         # Get nets to route
         nets = self.board_data.get('nets', {})
         logger.info(f"🔍 Raw nets data: {len(nets)} nets")
-        logger.debug(f"🔍 Nets type: {type(nets)}")
         
-        # Only call .items() if nets is actually a dictionary
-        if isinstance(nets, dict) and len(nets) > 0:
+        # Handle case where nets is a list instead of dict
+        if isinstance(nets, list):
+            logger.info(f"🔍 Converting nets list to dictionary format")
+            nets_dict = {}
+            for net in nets:
+                if isinstance(net, dict) and 'name' in net:
+                    # Convert KiCad interface format to autorouter format
+                    net_name = net['name']
+                    nets_dict[net_name] = {
+                        'net_code': net.get('id', 0),  # Use 'id' as 'net_code'
+                        'name': net_name,
+                        'pins': net.get('pins', []),
+                        'routed': net.get('routed', False),
+                        'has_tracks': net.get('has_tracks', False),
+                        'priority': net.get('priority', 1)
+                    }
+            nets = nets_dict
+            logger.info(f"🔍 Converted to dict with {len(nets)} nets")
+        
+        if nets and isinstance(nets, dict):
             logger.debug(f"🔍 First few nets: {dict(list(nets.items())[:3])}")
-        elif isinstance(nets, list):
-            logger.debug(f"🔍 Nets is a list with {len(nets)} items")
-            if nets:
-                logger.debug(f"🔍 First net item: {nets[0]}")
         else:
-            logger.debug(f"🔍 Unexpected nets type: {type(nets)}")
+            logger.debug(f"🔍 Nets type: {type(nets)}, empty or invalid")
         
         # Also check for alternative net structures
         raw_nets = self.board_data.get('_raw_nets', {})
@@ -1929,9 +2393,27 @@ class AutorouterEngine:
         
         logger.info(f"📡 Found {len(routable_nets)} routable nets out of {len(nets)} total")
         
+        # Debug: Show details about the first few nets and routable nets
+        if nets:
+            logger.debug(f"🔍 Sample net data: {dict(list(nets.items())[:2])}")
+        if routable_nets:
+            logger.debug(f"🔍 Sample routable nets: {dict(list(routable_nets.items())[:2])}")
+        else:
+            logger.warning(f"🔍 No nets passed filtering - checking first few nets:")
+            for i, (net_name, net_data) in enumerate(list(nets.items())[:3]):
+                logger.warning(f"     Net {i}: {net_name} = {net_data}")
+                if 'net_code' in net_data:
+                    net_code = net_data['net_code']
+                    pads = self._get_pads_for_net(net_code)
+                    logger.warning(f"     Net {net_name} (code {net_code}): {len(pads)} pads")
+        
         if not routable_nets:
             logger.warning("No routable nets found")
-            return False
+            self.routing_stats['nets_routed'] = 0
+            self.routing_stats['nets_failed'] = 0
+            self.routing_stats['nets_total'] = len(nets)
+            self.routing_stats['success_rate'] = 0.0
+            return self.routing_stats
         
         # Choose routing method based on GPU availability and net count
         if False:  # Disable parallel routing - causes DRC violations
@@ -1947,7 +2429,10 @@ class AutorouterEngine:
         
         self.routing_stats['nets_routed'] = success_count
         self.routing_stats['nets_failed'] = failure_count
+        self.routing_stats['nets_total'] = len(routable_nets)
+        self.routing_stats['success_rate'] = (success_count / len(routable_nets) * 100) if routable_nets else 0
         self.routing_stats['routing_time'] = time.time() - start_time
+        self.routing_stats['algorithm'] = 'lee_wavefront'
         
         # Log detailed results
         for net_name, result in results.items():
@@ -2009,7 +2494,19 @@ class AutorouterEngine:
             else:
                 logger.info(f"   🎉 IPC-2221A COMPLIANT: All routes meet manufacturing standards")
         
-        return success_count > 0
+        return self.routing_stats
+
+    def get_routing_statistics(self):
+        """Return routing statistics dictionary for UI display."""
+        return self.routing_stats
+
+    def get_routed_tracks(self):
+        """Return the list of routed tracks."""
+        return self.routed_tracks
+
+    def get_routed_vias(self):
+        """Return the list of routed vias."""
+        return self.routed_vias
     
     def _build_nets_from_airwires(self, airwires: List[Dict]) -> Dict:
         """Build nets dictionary from airwires data"""
@@ -2028,39 +2525,9 @@ class AutorouterEngine:
         logger.info(f"🔧 Built {len(nets)} nets from {len(airwires)} airwires")
         return nets
     
-    def _filter_routable_nets(self, nets) -> Dict:
+    def _filter_routable_nets(self, nets: Dict) -> Dict:
         """Filter nets that can and should be routed"""
         logger.info(f"🔍 Filtering nets: received {len(nets)} nets")
-        
-        # Ensure nets is a dictionary
-        if isinstance(nets, list):
-            logger.info("🔄 Converting nets list to dictionary format")
-            nets_dict = {}
-            for i, net_data in enumerate(nets):
-                logger.debug(f"🔍 Processing net list item {i}: {type(net_data)} - {net_data}")
-                if isinstance(net_data, dict) and 'name' in net_data:
-                    net_name = net_data['name']
-                    # Ensure net_code is available
-                    if 'net_code' not in net_data and 'id' in net_data:
-                        net_data['net_code'] = net_data['id']
-                    nets_dict[net_name] = net_data
-                elif hasattr(net_data, 'name'):
-                    # Handle KiCad API Net objects
-                    net_name = net_data.name
-                    net_code = getattr(net_data, 'code', getattr(net_data, 'net_code', 0))
-                    nets_dict[net_name] = {
-                        'name': net_name,
-                        'net_code': net_code
-                    }
-                    logger.debug(f"🔧 Converted net object: {net_name} -> code {net_code}")
-                else:
-                    logger.debug(f"Skipping invalid net data: {net_data}")
-            nets = nets_dict
-            logger.info(f"🔧 Converted {len(nets)} nets from list to dictionary")
-        elif not isinstance(nets, dict):
-            logger.error(f"Invalid nets type: {type(nets)}")
-            return {}
-        
         logger.debug(f"🔍 Net names: {list(nets.keys())[:10]}")  # Show first 10 net names
         
         routable = {}
@@ -2107,23 +2574,34 @@ class AutorouterEngine:
             pad_net = pad.get('net')
             
             # Debug first few pads to understand structure
-            if i < 3:
+            if i < 5:
                 logger.debug(f"🔍 Pad {i}: net={pad_net} (type: {type(pad_net)})")
                 if hasattr(pad_net, 'code'):
                     logger.debug(f"     Pad {i} net.code = {pad_net.code}")
+                if hasattr(pad_net, 'name'):
+                    logger.debug(f"     Pad {i} net.name = {pad_net.name}")
+                if isinstance(pad_net, dict):
+                    logger.debug(f"     Pad {i} net dict keys = {list(pad_net.keys())}")
             
             # Handle different net representations
             pad_net_code = None
-            if isinstance(pad_net, dict) and pad_net.get('code') == net_code:
-                pad_net_code = pad_net.get('code')
-                net_pads.append(pad)
+            if isinstance(pad_net, dict):
+                # Handle dict format
+                if 'code' in pad_net and pad_net['code'] == net_code:
+                    pad_net_code = pad_net['code']
+                    net_pads.append(pad)
+                elif 'id' in pad_net and pad_net['id'] == net_code:
+                    pad_net_code = pad_net['id']
+                    net_pads.append(pad)
             elif isinstance(pad_net, int) and pad_net == net_code:
                 pad_net_code = pad_net
                 net_pads.append(pad)
             elif hasattr(pad_net, 'code') and pad_net.code == net_code:
                 pad_net_code = pad_net.code
                 net_pads.append(pad)
-                logger.debug(f"     ✅ MATCHED pad {i}: net_code {pad_net.code} == target {net_code}")
+            elif hasattr(pad_net, 'id') and pad_net.id == net_code:
+                pad_net_code = pad_net.id
+                net_pads.append(pad)
         
         logger.debug(f"🔍 Found {len(net_pads)} pads for net_code {net_code}")
         if len(net_pads) == 0:
@@ -2158,7 +2636,9 @@ class AutorouterEngine:
                 net_obstacle_grids[layer] = self.obstacle_grids[layer].copy()
             
             # Only operation needed: exclude current net's pads to allow routing to them
+            print(f"🧹 MAIN: About to call _exclude_net_pads_from_obstacles for {net_name} on {layer}")
             self._exclude_net_pads_from_obstacles(net_obstacle_grids[layer], layer, net_name)
+            print(f"🧹 MAIN: Finished _exclude_net_pads_from_obstacles for {net_name} on {layer}")
         
         prep_time = time.time() - start_prep
         logger.debug(f"⚡ Incremental obstacle grids prepared in {prep_time:.3f}s (vs 2+ seconds before)")
@@ -2166,18 +2646,15 @@ class AutorouterEngine:
         # Try routing with rip-up and retry - ADJUSTED for multi-pad nets
         max_attempts = 1  # Keep at 1 for performance
         
-        # DYNAMIC TIMEOUT: Scale with net complexity AND obstacle density
-        obstacle_density = getattr(self, '_obstacle_density', 0.0)
-        density_multiplier = 1.0 + (obstacle_density * 2.0)  # Up to 3x longer for very dense boards
-        
+        # DYNAMIC TIMEOUT: Scale with net complexity (increased for Free Routing Space processing)
         if len(pads) >= 6:  # Complex multi-pad nets (6+ pads)
-            route_timeout = 25.0 * density_multiplier  # Much longer timeout for complex nets
+            route_timeout = 30.0  # Much longer timeout for complex nets with Free Routing Space
         elif len(pads) >= 3:  # Medium multi-pad nets (3-5 pads)  
-            route_timeout = 12.0 * density_multiplier   # Longer timeout for multi-pad nets
+            route_timeout = 20.0   # Longer timeout for multi-pad nets
         else:  # Simple 2-pad nets
-            route_timeout = 5.0 * density_multiplier   # Reasonable timeout for simple nets
+            route_timeout = 10.0   # Still generous timeout for simple nets with complex obstacles
         
-        logger.debug(f"🕐 {net_name}: {len(pads)} pads, density={obstacle_density:.1%}, timeout = {route_timeout:.1f}s")
+        logger.debug(f"🕐 {net_name}: {len(pads)} pads, timeout = {route_timeout:.1f}s")
         
         for attempt in range(max_attempts):
             logger.debug(f"🔄 Routing {net_name} - attempt {attempt + 1}/{max_attempts}")
@@ -4280,6 +4757,10 @@ class AutorouterEngine:
     def get_stats(self) -> Dict:
         """Get routing statistics"""
         return self.routing_stats.copy()
+    
+    def get_routing_statistics(self) -> Dict:
+        """Get routing statistics (alias for get_stats for UI compatibility)"""
+        return self.get_stats()
     
     def get_routable_nets(self) -> Dict:
         """Get the filtered routable nets for UI display"""
