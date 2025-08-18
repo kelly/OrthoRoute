@@ -33,6 +33,12 @@ For Manhattan routing patterns (the plugin's specialty), this approach is partic
 
 ## Screenshots
 
+_Testing / examples are the following_:
+
+- [CSEduino v4](https://github.com/jpralves/cseduino/tree/master/boards/2-layer)
+- [Sacred65 keyboard PCB](https://github.com/LordsBoards/Sacred65)
+- [RP2040 Minimal board](https://datasheets.raspberrypi.com/rp2040/Minimal-KiCAD.zip)
+
 ### Main Interface
 <div align="center">
   <img src="graphics/screenshots/Screencap1-cseduino4.png" alt="OrthoRoute Interface" width="800">
