@@ -12,6 +12,8 @@
 
 OrthoRoute is a GPU-accelerated PCB autorouter plugin for KiCad, designed to handle massive circuit boards that would be impractical to route by hand. Born out of necessity to route a backplane with 17,600 pads, OrthoRoute leverages CUDA cores to parallelize the most computationally intensive parts of PCB routing.
 
+A much more comprehensive explanation of the _why_ and _how_ of this repository is available on the [build log for this project](https://bbenchoff.github.io/pages/OrthoRoute.html).
+
 ## Key Features
 
 - GPU-Accelerated Routing: Uses CUDA/CuPy for wavefront expansion algorithms
