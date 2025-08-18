@@ -82,7 +82,7 @@ ENV/
 # IDE - PyCharm
 .idea/
 *.iml
-*.iws
+*.iws                   
 .idea_modules/
 
 # Testing
@@ -120,6 +120,7 @@ quick_*.py
 # Generated documentation
 docs/_build/
 docs/api/
+.github/
 
 # Log files
 *.log

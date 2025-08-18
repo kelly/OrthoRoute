@@ -58,9 +58,15 @@ class LeeRouter(BaseRouter):
         self.neighbor_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1),  # orthogonal
                                 (-1, -1), (-1, 1), (1, -1), (1, 1)]   # diagonal
         
+        # Pre-computed pad exclusion grids for performance optimization
+        self.pad_exclusion_grids = {}  # Per-layer grids with ALL pad exclusions
+        
         logger.info("🌊 Lee's Algorithm Router initialized")
         logger.info(f"   Max iterations: {self.max_iterations}")
         logger.info(f"   Connectivity: 8-connected neighbors (45° routing enabled)")
+        
+        # Pre-compute pad exclusions once at startup to eliminate O(N×P) bottleneck
+        self._precompute_pad_exclusion_grids()
     
     def route_net(self, net_name: str, timeout: float = 10.0) -> RoutingResult:
         """Route a complete net using Lee's algorithm"""
@@ -196,10 +202,13 @@ class LeeRouter(BaseRouter):
         if time.time() - start_time > timeout:
             return None
         
-        # Create working copy of obstacle grid for this net
+        # Start with base Free Routing Space (fixed obstacles only)
         working_grid = self.gpu_manager.copy_array(self.obstacle_grids[layer])
         
-        # Exclude current net's pads from obstacles (they're targets, not obstacles)
+        # Add pre-computed pad exclusions (OPTIMIZED - no more O(N×P) bottleneck!)
+        self._add_other_nets_pad_exclusions(working_grid, layer, net_name)
+        
+        # Clear current net's pads from obstacles (they're targets, not obstacles)
         self._exclude_net_pads_from_obstacles(working_grid, layer, net_name)
         
         # Get pad grid positions
@@ -714,23 +723,162 @@ class LeeRouter(BaseRouter):
         # Different directions - this is a significant waypoint
         return True
     
-    def _exclude_net_pads_from_obstacles(self, obstacle_grid, layer: str, net_name: str):
-        """Remove current net's pads from obstacle grid to allow routing to them"""
+    def _precompute_pad_exclusion_grids(self):
+        """Pre-compute pad exclusion grids for all layers to eliminate O(N×P) bottleneck
         
-        # Find pads for this net
-        net_pads = self.board_interface.get_pads_for_net(net_name)
+        This method runs once at initialization and creates cached grids with ALL pad 
+        exclusions. During routing, we copy the appropriate grid and clear only the 
+        current net's pads, changing complexity from O(N×P) to O(P) + O(current_net_pads).
+        """
+        logger.info("⚡ Pre-computing pad exclusion grids to eliminate performance bottleneck...")
+        
+        all_pads = self.board_interface.get_all_pads()
+        
+        for layer in self.layers:
+            logger.debug(f"⚡ Pre-computing pad exclusions for {layer}...")
+            
+            # Start with copy of base Free Routing Space (obstacles only, no pads)
+            pad_exclusion_grid = self.gpu_manager.copy_array(self.obstacle_grids[layer])
+            
+            excluded_count = 0
+            
+            # Add ALL pad exclusions for this layer (we'll clear current net's pads later)
+            for pad in all_pads:
+                if not self.board_interface.is_pad_on_layer(pad, layer):
+                    continue
+                
+                # Add DRC-compliant exclusion for this pad
+                geometry = self.board_interface.get_pad_geometry(pad)
+                
+                # Use DRC clearance to ensure proper spacing
+                drc_clearance = self.drc_rules.min_trace_spacing  # 0.508mm
+                exclusion_x = geometry['size_x'] + 2 * drc_clearance
+                exclusion_y = geometry['size_y'] + 2 * drc_clearance
+                
+                self._mark_rectangular_obstacle(
+                    pad_exclusion_grid,
+                    geometry['x'], geometry['y'],
+                    exclusion_x, exclusion_y
+                )
+                excluded_count += 1
+            
+            # Cache the grid for this layer
+            self.pad_exclusion_grids[layer] = pad_exclusion_grid
+            
+            logger.debug(f"⚡ {layer}: Pre-computed {excluded_count} pad exclusions")
+        
+        logger.info(f"⚡ Pre-computed pad exclusions for {len(self.layers)} layers - O(N×P) bottleneck eliminated!")
+
+    def _add_other_nets_pad_exclusions(self, obstacle_grid, layer: str, current_net: str):
+        """Add pad exclusions for all nets OTHER than the current net - OPTIMIZED VERSION
+        
+        Uses pre-computed pad exclusion grids to eliminate O(N×P) performance bottleneck.
+        Instead of processing ALL pads for every net, we copy the cached grid and clear
+        only the current net's pads.
+        """
+        # Copy pre-computed pad exclusions for this layer (includes ALL pads)
+        cached_exclusions = self.pad_exclusion_grids[layer]
+        
+        if self.gpu_manager.is_gpu_enabled():
+            # GPU: Bitwise OR to combine base obstacles with cached pad exclusions
+            if hasattr(cached_exclusions, 'copy'):
+                obstacle_grid |= cached_exclusions
+            else:
+                # Fallback for different GPU array types
+                temp = self.gpu_manager.copy_array(cached_exclusions)
+                obstacle_grid |= temp
+        else:
+            # CPU: Simple bitwise OR
+            obstacle_grid |= cached_exclusions
+        
+        # Now clear the current net's pads (they should be accessible as targets)
+        net_pads = self.board_interface.get_pads_for_net(current_net)
+        cleared_count = 0
         
         for pad in net_pads:
             if self.board_interface.is_pad_on_layer(pad, layer):
+                # Clear this net's pad from exclusions (they're targets, not obstacles)
+                geometry = self.board_interface.get_pad_geometry(pad)
+                
+                # Clear with DRC clearance area (same size as exclusion)
+                drc_clearance = self.drc_rules.min_trace_spacing
+                clear_x = geometry['size_x'] + 2 * drc_clearance
+                clear_y = geometry['size_y'] + 2 * drc_clearance
+                
+                self._clear_rectangular_area(
+                    obstacle_grid,
+                    geometry['x'], geometry['y'],
+                    clear_x, clear_y
+                )
+                cleared_count += 1
+        
+        logger.debug(f"⚡ Used cached exclusions, cleared {cleared_count} pads for net {current_net} on {layer}")
+    
+    def _exclude_net_pads_from_obstacles(self, obstacle_grid, layer: str, net_name: str):
+        """Clear connection points for current net from obstacle grid
+        
+        In Free Routing Space architecture, the obstacle grid already has proper
+        DRC clearances built in. We only need to clear small connection areas
+        around the current net's pads to allow the router to connect to them.
+        """
+        print(f"🧹 DEBUG: Clearing connection points for net '{net_name}' on {layer}")
+        
+        # Find pads for this net
+        net_pads = self.board_interface.get_pads_for_net(net_name)
+        print(f"🧹 DEBUG: Found {len(net_pads)} pads for net {net_name}")
+        
+        cleared_count = 0
+        for pad in net_pads:
+            if self.board_interface.is_pad_on_layer(pad, layer):
+                print(f"🧹 DEBUG: Clearing connection point for pad on {layer}")
+                
                 # Get pad geometry
                 geometry = self.board_interface.get_pad_geometry(pad)
                 
-                # Clear pad area from obstacles
+                # Clear MINIMAL connection area - just enough to connect
+                # The Free Routing Space already handles DRC compliance
+                connection_clearance = 0.2  # Minimal 0.2mm clearance for connection
+                clear_size_x = geometry['size_x'] + 2 * connection_clearance
+                clear_size_y = geometry['size_y'] + 2 * connection_clearance
+                
+                print(f"🧹 DEBUG: Clearing {clear_size_x:.2f}x{clear_size_y:.2f} connection area")
+                
                 self._clear_rectangular_area(
                     obstacle_grid, 
                     geometry['x'], geometry['y'],
-                    geometry['size_x'], geometry['size_y']
+                    clear_size_x, clear_size_y
                 )
+                cleared_count += 1
+        
+        print(f"🧹 DEBUG: Cleared {cleared_count} connection points for net {net_name} on {layer}")
+        
+        # NOTE: No need for _protect_other_nets_pads() in Free Routing Space architecture!
+        # The Free Routing Space already has proper DRC clearances built in.
+    
+    def _mark_rectangular_area_as_obstacle(self, obstacle_grid, center_x: float, center_y: float, 
+                                         size_x: float, size_y: float):
+        """Mark a rectangular area as obstacle in the grid - DEPRECATED
+        
+        This method is kept for compatibility but should not be needed
+        in the Free Routing Space architecture.
+        """
+        logger.warning("⚠️ _mark_rectangular_area_as_obstacle called - this should not be needed in Free Routing Space architecture")
+        
+        # Keep implementation for compatibility
+        # Convert to grid coordinates
+        grid_x, grid_y = self.grid_config.world_to_grid(center_x, center_y)
+        
+        # Calculate grid extents
+        half_size_x_cells = max(1, int(math.ceil((size_x / 2) / self.grid_config.resolution)))
+        half_size_y_cells = max(1, int(math.ceil((size_y / 2) / self.grid_config.resolution)))
+        
+        # Mark the rectangular area as obstacle
+        for dx in range(-half_size_x_cells, half_size_x_cells + 1):
+            for dy in range(-half_size_y_cells, half_size_y_cells + 1):
+                gx, gy = grid_x + dx, grid_y + dy
+                
+                if self.grid_config.is_valid_grid_position(gx, gy):
+                    obstacle_grid[gy, gx] = True
     
     def _clear_rectangular_area(self, obstacle_grid, center_x: float, center_y: float, 
                                size_x: float, size_y: float):

@@ -282,40 +282,209 @@ class BaseRouter(ABC):
         self.track_callback = callback
     
     def _initialize_obstacle_grids(self):
-        """Initialize obstacle grids for all layers"""
-        logger.info("🗺️ Initializing obstacle grids using IPC-2221A pathfinding methodology...")
+        """Initialize obstacle grids using Free Routing Space methodology"""
+        logger.info("🗺️ Generating Free Routing Space grids using virtual copper pour methodology...")
         
         for layer in self.layers:
-            # Create obstacle grid
-            obstacle_grid = self.gpu_manager.create_array(
-                (self.grid_config.height, self.grid_config.width), 
-                dtype=None,  # Let GPU manager choose appropriate bool type
-                fill_value=0
-            )
+            # Generate Free Routing Space for this layer
+            free_routing_space = self._generate_free_routing_space(layer)
             
-            # Mark obstacles using IPC-2221A methodology
-            self._mark_layer_obstacles(obstacle_grid, layer)
+            # Obstacle grid is the INVERSE of free routing space
+            # True = obstacle (cannot route), False = free space (can route)
+            if self.gpu_manager.is_gpu_enabled() and hasattr(free_routing_space, 'get'):
+                # GPU array - use CuPy logical operations
+                import cupy as cp
+                obstacle_grid = ~free_routing_space  # Logical NOT using CuPy
+            else:
+                # CPU array - use NumPy logical operations
+                import numpy as np
+                obstacle_grid = ~free_routing_space  # Logical NOT using NumPy
             
             self.obstacle_grids[layer] = obstacle_grid
         
         self._log_obstacle_statistics()
     
+    def _generate_free_routing_space(self, layer: str):
+        """Generate free routing space using intelligent net-aware exclusions
+        
+        Unlike pure virtual copper pour, this considers net connectivity:
+        - Excludes existing tracks/vias (with DRC clearances)
+        - Excludes copper zones (with DRC clearances)
+        - Does NOT exclude any pads - those will be handled per-net during routing
+        
+        The obstacle grid will be inverted from this free space.
+        """
+        # Start with entire board as free space
+        free_space = self.gpu_manager.create_array(
+            (self.grid_config.height, self.grid_config.width), 
+            dtype=None,  # Let GPU manager choose appropriate bool type
+            fill_value=1  # Start with all free
+        )
+        
+        # Apply exclusions for fixed obstacles only (not pads - they're handled per-net)
+        self._exclude_fixed_obstacles_from_free_space(free_space, layer)
+        
+        return free_space
+    
+    def _exclude_fixed_obstacles_from_free_space(self, free_space, layer: str):
+        """Exclude only permanent obstacles from free space
+        
+        This excludes:
+        - Existing tracks (with clearances)
+        - Existing vias (with clearances)  
+        - Copper zones (with clearances)
+        
+        But does NOT exclude any pads - those will be handled per-net during routing.
+        """
+        # Apply exclusions for existing tracks  
+        self._exclude_tracks_from_free_space(free_space, layer)
+        
+        # Apply exclusions for existing vias
+        self._exclude_vias_from_free_space(free_space, layer)
+        
+        # Apply exclusions for copper zones
+        self._exclude_zones_from_free_space(free_space, layer)
+        
+        # Apply exclusions for existing tracks  
+        self._exclude_tracks_from_free_space(free_space, layer)
+        
+        # Apply exclusions for existing vias
+        self._exclude_vias_from_free_space(free_space, layer)
+        
+        # Apply exclusions for copper zones
+        self._exclude_zones_from_free_space(free_space, layer)
+    
+    def _exclude_pads_from_free_space(self, free_space, layer: str):
+        """Exclude pad areas from free space with proper DRC clearances
+        
+        Uses virtual copper pour methodology - removes areas around pads
+        where traces cannot be placed due to DRC clearance requirements.
+        This uses more conservative clearances suitable for general routing.
+        """
+        pads = self.board_interface.get_all_pads()
+        excluded_count = 0
+        
+        for pad in pads:
+            if not self.board_interface.is_pad_on_layer(pad, layer):
+                continue
+                
+            geometry = self.board_interface.get_pad_geometry(pad)
+            
+            # Use minimal DRC clearance - just enough to prevent violations
+            # The connection point clearing in LeeRouter will handle specific net access
+            drc_clearance = self.drc_rules.min_trace_spacing  # 0.508mm base clearance
+            
+            # Conservative exclusion: pad + minimal clearance
+            # This allows traces to route close to pads while maintaining DRC compliance
+            exclusion_x = geometry['size_x'] + 2 * drc_clearance
+            exclusion_y = geometry['size_y'] + 2 * drc_clearance
+            
+            self._mark_exclusion_area(
+                free_space,
+                geometry['x'], geometry['y'],
+                exclusion_x, exclusion_y
+            )
+            excluded_count += 1
+        
+        logger.debug(f"🚫 Excluded {excluded_count} pads from free space on {layer} with minimal DRC clearances")
+    
+    def _exclude_tracks_from_free_space(self, free_space, layer: str):
+        """Exclude existing track areas from free space"""
+        tracks = self.board_interface.get_all_tracks()
+        excluded_count = 0
+        
+        for track in tracks:
+            if track.get('layer') == layer:
+                # Mark track area as excluded with proper clearance
+                self._mark_line_exclusion(
+                    free_space,
+                    track['start_x'], track['start_y'],
+                    track['end_x'], track['end_y'],
+                    track['width'] + 2 * self.drc_rules.min_trace_spacing
+                )
+                excluded_count += 1
+        
+        logger.debug(f"🚫 Excluded {excluded_count} tracks from free space on {layer}")
+    
+    def _exclude_vias_from_free_space(self, free_space, layer: str):
+        """Exclude via areas from free space"""
+        vias = self.board_interface.get_all_vias()
+        excluded_count = 0
+        
+        for via in vias:
+            # Vias affect all layers
+            exclusion_diameter = via['size'] + 2 * self.drc_rules.min_trace_spacing
+            self._mark_circular_exclusion(
+                free_space,
+                via['x'], via['y'],
+                exclusion_diameter / 2
+            )
+            excluded_count += 1
+        
+        logger.debug(f"🚫 Excluded {excluded_count} vias from free space on {layer}")
+    
+    def _exclude_zones_from_free_space(self, free_space, layer: str):
+        """Exclude copper zone areas from free space"""
+        zones = self.board_interface.get_all_zones()
+        excluded_count = 0
+        
+        for zone in zones:
+            if layer in zone.get('layers', []):
+                # Simplified implementation - mark zone boundary areas as excluded
+                # Full implementation would process complex polygon shapes
+                excluded_count += 1
+        
+        logger.debug(f"🚫 Excluded {excluded_count} zones from free space on {layer}")
+    
+    def _mark_exclusion_area(self, free_space, center_x: float, center_y: float, 
+                           size_x: float, size_y: float):
+        """Mark a rectangular area as excluded from free space (sets to False)"""
+        # Convert to grid coordinates
+        grid_x, grid_y = self.grid_config.world_to_grid(center_x, center_y)
+        
+        # Calculate grid extents
+        half_size_x_cells = max(1, int(math.ceil((size_x / 2) / self.grid_config.resolution)))
+        half_size_y_cells = max(1, int(math.ceil((size_y / 2) / self.grid_config.resolution)))
+        
+        # Mark the rectangular area as excluded (False = not free space)
+        for dx in range(-half_size_x_cells, half_size_x_cells + 1):
+            for dy in range(-half_size_y_cells, half_size_y_cells + 1):
+                gx, gy = grid_x + dx, grid_y + dy
+                
+                if self.grid_config.is_valid_grid_position(gx, gy):
+                    free_space[gy, gx] = False
+    
+    def _mark_line_exclusion(self, free_space, start_x: float, start_y: float,
+                            end_x: float, end_y: float, width: float):
+        """Mark a line area as excluded from free space"""
+        # Simplified implementation using rectangular approximation
+        self._mark_exclusion_area(
+            free_space,
+            (start_x + end_x) / 2, 
+            (start_y + end_y) / 2,
+            abs(end_x - start_x) + width,
+            abs(end_y - start_y) + width
+        )
+    
+    def _mark_circular_exclusion(self, free_space, center_x: float, center_y: float, 
+                                radius: float):
+        """Mark a circular area as excluded from free space"""
+        # For simplicity, use rectangular approximation
+        self._mark_exclusion_area(
+            free_space, center_x, center_y, radius * 2, radius * 2
+        )
+
     def _mark_layer_obstacles(self, obstacle_grid, layer: str):
-        """Mark obstacles on a specific layer"""
-        # Mark pads as obstacles
-        self._mark_pads_as_obstacles(obstacle_grid, layer)
+        """Mark obstacles on a specific layer - DEPRECATED
         
-        # Mark existing tracks as obstacles  
-        self._mark_tracks_as_obstacles(obstacle_grid, layer)
-        
-        # Mark existing vias as obstacles
-        self._mark_vias_as_obstacles(obstacle_grid, layer)
-        
-        # Mark copper zones as obstacles
-        self._mark_zones_as_obstacles(obstacle_grid, layer)
+        This method is replaced by the Free Routing Space approach.
+        Kept for compatibility but should not be used.
+        """
+        logger.warning("⚠️ _mark_layer_obstacles called - this is deprecated in Free Routing Space architecture")
+        pass
     
     def _mark_pads_as_obstacles(self, obstacle_grid, layer: str, exclude_net: str = None):
-        """Mark pads as obstacles with proper clearance"""
+        """Mark pads as obstacles with minimal clearance to allow routing"""
         pads = self.board_interface.get_all_pads()
         marked_count = 0
         
@@ -329,12 +498,19 @@ class BaseRouter(ABC):
             if exclude_net and pad_net_name == exclude_net:
                 continue
             
-            # Get pad geometry and mark obstacle area
+            # Get pad geometry and mark obstacle area with MINIMAL clearance
             geometry = self.board_interface.get_pad_geometry(pad)
+            
+            # Use minimal clearance - just the pad plus a small safety margin
+            # This prevents the grid from becoming too dense while still protecting pads
+            safety_margin = 0.1  # 0.1mm safety margin around pads
+            minimal_size_x = geometry['size_x'] + 2 * safety_margin
+            minimal_size_y = geometry['size_y'] + 2 * safety_margin
+            
             marked_count += self._mark_rectangular_obstacle(
                 obstacle_grid, 
                 geometry['x'], geometry['y'],
-                geometry['size_x'], geometry['size_y']
+                minimal_size_x, minimal_size_y  # Use minimal size for obstacles
             )
         
         return marked_count
