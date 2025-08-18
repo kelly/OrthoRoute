@@ -10,32 +10,26 @@
   </tr>
 </table>
 
-GPU-accelerated PCB autorouting plugin with advanced thermal relief modeling and professional-grade pathfinding capabilities.
+OrthoRoute is a GPU-accelerated PCB autorouter plugin for KiCad, designed to handle massive circuit boards that would be impractical to route by hand. Born out of necessity to route a backplane with 17,600 pads, OrthoRoute leverages CUDA cores to parallelize the most computationally intensive parts of PCB routing.
 
-## 🎯 Key Achievements
+## Key Features
 
-- **73-79% Thermal Relief Accuracy**: Validated virtual copper pour generation against real KiCad copper pours with thermal reliefs
-- **Production Pathfinding Implemented**: GPU-accelerated Lee's algorithm with thermal relief-aware obstacle detection
-- **Advanced Obstacle Mapping**: Precise modeling of thermal relief gaps and spoke patterns for accurate pathfinding
-- **Production-Speed Routing**: 3.52 second routing of 28 nets with 1498 tracks (311.6mm total length)
-- **GPU-Accelerated Lee's Algorithm**: 8-connected pathfinding with 45-degree routing capability
+- GPU-Accelerated Routing: Uses CUDA/CuPy for wavefront expansion algorithms
+- Manhattan Routing: Specialized for orthogonal routing patterns (horizontal/vertical layer pairs)
+- KiCad Integration: Built as a native KiCad plugin using the IPC API
+- Real-time Visualization: Interactive 2D board view with zoom, pan, and layer controls
+- Multi-layer Support: Handles complex multi-layer PCB designs
 
-## Features
+## Why GPU Acceleration?
 
-- **🌡️ Thermal Relief-Aware Pathfinding**: Production-quality routing with validated thermal relief obstacle detection (73-79% accuracy)
-- **Enhanced GPU-Accelerated Routing**: Ultra-fast autorouting with batch processing and massive parallelization
-- **Production-Quality DRC Compliance**: Proper trace-to-pad clearances and advanced via placement strategies  
-- **Validated Thermal Relief Modeling**: 79% accuracy virtual copper pour generation with optimized 0.25mm thermal gaps
-- **Advanced Obstacle Detection**: Comprehensive thermal relief pattern recognition for accurate pathfinding between pads
-- **8-Connected Pathfinding**: Professional 45-degree routing with GPU acceleration and CPU fallback
-- **Exact Pad Shapes**: Uses KiCad's native polygon APIs for precise pad geometry extraction
-- **KiCad IPC Integration**: Seamless communication with KiCad via modern IPC APIs
-- **Real-time Visualization**: Interactive 2D board view with zoom, pan, and layer controls
-- **Professional Interface**: Clean PyQt6-based interface with KiCad color themes
-- **Multi-layer Support**: Handle complex multi-layer PCB designs with front/back copper visualization
-- **Advanced Routing Quality**: Path optimization, adaptive via placement, and multi-strategy routing
-- **Manhattan Routing**: Where OrthoRoute gets its name
-- **It's A Plugin**: Just install it using the KiCad Plugin Manager
+Traditional autorouters like FreeRouting can take hours or even days on large boards. OrthoRoute uses GPUs for the embarrassingly parallel parts of routing - specifically Lee's wavefront expansion algorithm - while handling constraints and decision-making on the CPU.
+
+For Manhattan routing patterns (the plugin's specialty), this approach is particularly effective because:
+
+- Traces follow predictable orthogonal patterns
+- Each layer has a dedicated direction (horizontal or vertical)
+- Geometric constraints make the problem highly parallelizable
+
 
 ## Screenshots
 
@@ -46,28 +40,13 @@ GPU-accelerated PCB autorouting plugin with advanced thermal relief modeling and
   <em>OrthoRoute plugin showing real-time PCB visualization with airwires and routing analysis</em>
 </div>
 
-## 🏗️ Project Structure
+## Performance
 
-```
-OrthoRoute/
-├── src/                           # Source code
-│   ├── core/                      # Core infrastructure
-│   │   ├── drc_rules.py          # DRC rules management
-│   │   ├── gpu_manager.py        # GPU acceleration
-│   │   └── board_interface.py    # Board data abstraction
-│   ├── routing_engines/           # Pluggable routing algorithms
-│   │   ├── base_router.py        # Abstract router interface
-│   │   └── lees_router.py        # Lee's wavefront implementation
-│   ├── data_structures/           # Common data structures
-│   ├── autorouter_factory.py     # Main factory interface
-│   ├── orthoroute_plugin.py      # Plugin entry point
-│   ├── orthoroute_window.py      # UI components
-│   └── kicad_interface.py        # KiCad integration
-├── docs/                          # Documentation
-├── graphics/                      # Icons and screenshots
-├── tests/                         # Test suite
-└── build/                         # Build artifacts
-```
+While general autorouting remains a complex constraint-satisfaction problem, OrthoRoute excels at:
+
+- Large backplanes with regular connector patterns
+- Manhattan-style routing requirements
+- Boards where traditional autorouters would take prohibitively long
 
 ## 🚀 Quick Start
 
@@ -97,39 +76,29 @@ OrthoRoute/
 3. **Route your nets** using the enhanced autorouter
 4. **Visualize results** with the interactive PCB viewer
 
-## 🔧 Available Routing Algorithms
 
-### Currently Implemented
-- **🌊 Lee's Wavefront**: GPU-accelerated pathfinding with multi-layer support
-- **📐 Manhattan**: Orthogonal routing (coming soon)
-- **🎯 A* Pathfinding**: Heuristic-guided routing (coming soon)
+## 🏗️ Project Structure
 
-### Algorithm Selection
-```python
-from autorouter_factory import create_autorouter, RoutingAlgorithm
-
-# Create autorouter with specific algorithm
-autorouter = create_autorouter(
-    board_data=board_data,
-    kicad_interface=kicad_interface,
-    algorithm=RoutingAlgorithm.LEE_WAVEFRONT
-)
-
-# Route all nets
-stats = autorouter.route_all_nets(timeout_per_net=5.0)
 ```
-
-## 📊 Performance
-
-### Benchmark Results
-- **Before**: 33.56 seconds for 29 nets (1.16s per net)
-- **After**: <5 seconds target (0.17s per net)
-- **Improvement**: 6.7x faster with GPU acceleration
-
-### Quality Improvements
-- **Clearance**: 8.0x improvement (0.02mm → 0.16mm from pad edge)
-- **Via Placement**: 2.3x more positions (3 → 7 strategic locations)  
-- **DRC Compliance**: Production-quality with zero violations
+OrthoRoute/
+├── src/                           # Source code
+│   ├── core/                      # Core infrastructure
+│   │   ├── drc_rules.py          # DRC rules management
+│   │   ├── gpu_manager.py        # GPU acceleration
+│   │   └── board_interface.py    # Board data abstraction
+│   ├── routing_engines/           # Pluggable routing algorithms
+│   │   ├── base_router.py        # Abstract router interface
+│   │   └── lees_router.py        # Lee's wavefront implementation
+│   ├── data_structures/           # Common data structures
+│   ├── autorouter_factory.py     # Main factory interface
+│   ├── orthoroute_plugin.py      # Plugin entry point
+│   ├── orthoroute_window.py      # UI components
+│   └── kicad_interface.py        # KiCad integration
+├── docs/                          # Documentation
+├── graphics/                      # Icons and screenshots
+├── tests/                         # Test suite
+└── build/                         # Build artifacts
+```
 
 ## 🏗️ Building
 
@@ -143,29 +112,21 @@ python build_ipc_plugin.py
 python build.py --package development
 ```
 
-## 📚 Documentation
 
-Comprehensive documentation is available in the [`docs/`](docs/) folder:
+## Current Status
 
-- **[Modular Architecture](docs/MODULAR_ARCHITECTURE.md)** - System design and components
-- **[Installation Guide](docs/INSTALL.md)** - Detailed setup instructions
-- **[API Reference](docs/api_reference.md)** - Complete API documentation
-- **[Contributing](docs/contributing.md)** - Development guidelines
-
-## 🎯 Current Status
-
-### ✅ Production Ready
+### Production Ready
 - **Enhanced Autorouter**: Professional-grade routing with DRC compliance
 - **GPU Acceleration**: Batch processing and massive parallelization
 - **KiCad Integration**: Full IPC API support for real-time board data
 - **Interactive Visualization**: Complete PCB viewer with layer controls
 
-### 🚧 In Development  
+### In Development  
 - **Manhattan Routing**: Orthogonal routing algorithm
 - **A* Pathfinding**: Heuristic-guided routing
 - **Advanced Features**: Push-and-shove, differential pairs
 
-## 🤝 Contributing
+##  Contributing
 
 We welcome contributions! Please see [`docs/contributing.md`](docs/contributing.md) for guidelines.
 
