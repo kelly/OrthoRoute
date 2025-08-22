@@ -139,7 +139,8 @@ class BaseRouter(ABC):
     """Abstract base class for all routing algorithms"""
     
     def __init__(self, board_interface: BoardInterface, drc_rules: DRCRules, 
-                 gpu_manager: GPUManager, grid_config: GridConfig):
+                 gpu_manager: GPUManager, grid_config: GridConfig, 
+                 use_virtual_copper: bool = False):
         """
         Initialize base router
         
@@ -148,13 +149,15 @@ class BaseRouter(ABC):
             drc_rules: Design rule constraints
             gpu_manager: GPU resource manager
             grid_config: Grid configuration
+            use_virtual_copper: Whether to use Virtual Copper Generator for obstacle detection
         """
         self.board_interface = board_interface
         self.drc_rules = drc_rules
         self.gpu_manager = gpu_manager
         self.grid_config = grid_config
+        self.use_virtual_copper = use_virtual_copper
         
-        # Initialize obstacle grids for pathfinding
+        # Initialize basic data structures (but not obstacle grids - let each router decide)
         self.obstacle_grids = {}
         self.layers = board_interface.get_layers()
         
@@ -165,12 +168,19 @@ class BaseRouter(ABC):
         # Progress and callbacks
         self.progress_callback = None
         self.track_callback = None
+        self.via_callback = None
         
         logger.info(f"🚀 {self.__class__.__name__} initialized")
         logger.info(f"  Layers: {self.layers}")
         logger.info(f"  GPU enabled: {self.gpu_manager.is_gpu_enabled()}")
+        logger.info(f"  Using virtual copper: {self.use_virtual_copper}")
         
-        self._initialize_obstacle_grids()
+        # Initialize obstacle grids if virtual copper is enabled
+        if self.use_virtual_copper:
+            logger.info("🗺️ Initializing Free Routing Space architecture...")
+            self._initialize_obstacle_grids()
+        else:
+            logger.info("🚀 Skipping virtual copper generation - using router-specific obstacle detection")
     
     @abstractmethod
     def route_net(self, net_name: str, timeout: float = 10.0) -> RoutingResult:
@@ -218,7 +228,8 @@ class BaseRouter(ABC):
         start_time = time.time()
         routable_nets = self.board_interface.get_routable_nets()
         
-        logger.info(f"🔄 Starting routing of {len(routable_nets)} nets with {self.__class__.__name__}")
+        logger.info(f"� BASE ROUTER route_all_nets called! routable_nets type: {type(routable_nets)}")
+        logger.info(f"�🔄 Starting routing of {len(routable_nets)} nets with {self.__class__.__name__}")
         
         # Sort nets by complexity (fewer pads first)
         nets_by_complexity = sorted(routable_nets.items(), 
@@ -278,7 +289,7 @@ class BaseRouter(ABC):
         tracks = []
         for segment in self.routed_segments:
             if segment.type == 'track':
-                tracks.append(segment.to_kicad_dict())
+                tracks.append(segment.to_kicad_dict(self))
         return tracks
     
     def get_routed_vias(self) -> List[Dict]:
@@ -286,7 +297,7 @@ class BaseRouter(ABC):
         vias = []
         for segment in self.routed_segments:
             if segment.type == 'via':
-                vias.append(segment.to_kicad_dict())
+                vias.append(segment.to_kicad_dict(self))
         return vias
     
     def set_progress_callback(self, callback):
@@ -296,6 +307,10 @@ class BaseRouter(ABC):
     def set_track_callback(self, callback):
         """Set real-time track update callback"""
         self.track_callback = callback
+    
+    def set_via_callback(self, callback):
+        """Set real-time via update callback"""
+        self.via_callback = callback
     
     def _initialize_obstacle_grids(self):
         """Initialize obstacle grids using Virtual Copper Generator methodology"""

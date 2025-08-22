@@ -57,7 +57,8 @@ class LeeRouter(BaseRouter):
     def __init__(self, board_interface: BoardInterface, drc_rules: DRCRules, 
                  gpu_manager: GPUManager, grid_config: GridConfig):
         """Initialize Lee's algorithm router"""
-        super().__init__(board_interface, drc_rules, gpu_manager, grid_config)
+        # Lee's router uses Free Routing Space architecture
+        super().__init__(board_interface, drc_rules, gpu_manager, grid_config, use_virtual_copper=True)
         
         # Lee's algorithm specific configuration
         self.max_iterations = 20000  # Maximum wavefront expansion iterations (increased for complex routing)
@@ -68,7 +69,7 @@ class LeeRouter(BaseRouter):
         # Pre-computed pad exclusion grids for performance optimization
         self.pad_exclusion_grids = {}  # Per-layer grids with ALL pad exclusions
         
-        logger.info("🌊 Lee's Algorithm Router initialized")
+        logger.info("🌊 Lee's Algorithm Router initialized with Free Routing Space")
         logger.info(f"   Max iterations: {self.max_iterations}")
         logger.info(f"   Connectivity: 8-connected neighbors (45° routing enabled)")
         

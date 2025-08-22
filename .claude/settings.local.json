@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(rm:*)",
+      "Bash(find:*)",
+      "WebSearch",
+      "WebFetch(domain:docs.kicad.org)",
+      "Bash(grep:*)",
+      "Bash(sed:*)",
+      "WebFetch(domain:dev-docs.kicad.org)",
+      "WebFetch(domain:forum.kicad.info)",
+      "WebFetch(domain:adamws.github.io)",
+      "WebFetch(domain:github.com)"
+    ],
+    "deny": [],
+    "ask": [],
+    "additionalDirectories": [
+      "C:\\c\\Users\\Benchoff\\Documents\\GitHub",
+      "C:\\c\\Users"
+    ]
+  }
+}

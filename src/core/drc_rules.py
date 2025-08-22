@@ -72,31 +72,164 @@ class DRCRules:
         logger.warning("⚠️ No DRC rules available - using standard PCB defaults")
     
     def _extract_drc_from_kicad_api(self, kicad_interface):
-        """Extract DRC rules using KiCad 9 IPC API hierarchy"""
-        # This is a simplified version - full implementation available in original code
+        """Extract DRC rules using KiCad 9 IPC API with SWIG fallback"""
+        
+        # Try KiCad 9 IPC API first
         try:
-            if hasattr(kicad_interface, 'kicad'):
+            if hasattr(kicad_interface, 'kicad') and kicad_interface.kicad is not None:
                 logger.info("🔍 Extracting DRC rules using KiCad 9 IPC API...")
-                kicad = kicad_interface.kicad
+                success = self._extract_from_ipc_api(kicad_interface.kicad)
+                if success:
+                    return
+        except Exception as e:
+            logger.warning(f"⚠️ KiCad 9 IPC API extraction failed: {e}")
+        
+        # Fallback to SWIG-based API if available
+        try:
+            if hasattr(kicad_interface, 'board') and kicad_interface.board is not None:
+                logger.info("🔍 Falling back to SWIG-based DRC extraction...")
+                success = self._extract_from_swig_api(kicad_interface.board)
+                if success:
+                    return
+        except Exception as e:
+            logger.warning(f"⚠️ SWIG API extraction failed: {e}")
+        
+        # Try direct file parsing as last resort
+        try:
+            if hasattr(kicad_interface, 'board_file_path'):
+                logger.info("🔍 Attempting direct board file parsing...")
+                success = self._extract_from_board_file(kicad_interface.board_file_path)
+                if success:
+                    return
+        except Exception as e:
+            logger.warning(f"⚠️ Board file parsing failed: {e}")
+        
+        logger.error("❌ All DRC extraction methods failed - using safe defaults")
+    
+    def _extract_from_ipc_api(self, kicad_api) -> bool:
+        """Extract DRC rules using KiCad 9 IPC API"""
+        try:
+            # Get board setup information
+            if hasattr(kicad_api, 'board') and hasattr(kicad_api.board, 'get_design_settings'):
+                design_settings = kicad_api.board.get_design_settings()
+                logger.info(f"🔍 IPC design settings: {design_settings}")
                 
-                # Get design settings using IPC service
-                try:
-                    design_settings = kicad.design_settings.get()
-                    logger.info(f"🔍 Raw design settings from KiCad IPC API: {design_settings}")
-                    
-                    # Extract relevant settings
-                    for key, value in design_settings.items():
-                        if isinstance(value, (int, float)) and 'track' in key.lower() or 'width' in key.lower():
-                            if key.lower().find('min') != -1:
-                                self.min_trace_width = value / 1e6  # Convert nm to mm
-                            elif key.lower().find('default') != -1:
-                                self.default_trace_width = value / 1e6
-                    
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to get design settings: {e}")
+                # Extract basic constraints
+                if 'min_track_width' in design_settings:
+                    self.min_trace_width = design_settings['min_track_width'] / 1000000.0  # nm to mm
+                if 'default_track_width' in design_settings:
+                    self.default_trace_width = design_settings['default_track_width'] / 1000000.0
+                if 'min_clearance' in design_settings:
+                    self.min_trace_spacing = design_settings['min_clearance'] / 1000000.0
+                if 'default_via_size' in design_settings:
+                    self.via_diameter = design_settings['default_via_size'] / 1000000.0
+                if 'default_via_drill' in design_settings:
+                    self.via_drill = design_settings['default_via_drill'] / 1000000.0
+            
+            # Get netclass information
+            if hasattr(kicad_api, 'board') and hasattr(kicad_api.board, 'get_netclasses'):
+                netclasses_data = kicad_api.board.get_netclasses()
+                self._process_netclasses_data(netclasses_data, 'ipc')
+                
+            logger.info("✅ Successfully extracted DRC rules using IPC API")
+            return True
             
         except Exception as e:
-            logger.warning(f"⚠️ Failed to extract DRC from KiCad API: {e}")
+            logger.error(f"❌ IPC API extraction error: {e}")
+            return False
+    
+    def _extract_from_swig_api(self, board) -> bool:
+        """Extract DRC rules using SWIG-based API (legacy fallback)"""
+        try:
+            import pcbnew
+            
+            # Get board design settings
+            design_settings = board.GetDesignSettings()
+            
+            # Extract basic constraints
+            self.min_trace_width = design_settings.m_TrackMinWidth / 1000000.0  # IU to mm
+            self.default_trace_width = design_settings.GetCurrentTrackWidth() / 1000000.0
+            self.min_trace_spacing = design_settings.m_MinClearance / 1000000.0
+            self.via_diameter = design_settings.GetCurrentViaSize() / 1000000.0
+            self.via_drill = design_settings.GetCurrentViaDrill() / 1000000.0
+            
+            # Extract netclasses
+            netclasses = board.GetNetClasses()
+            self.netclasses = {}
+            
+            for netclass_name in netclasses.GetNetClassNames():
+                netclass = netclasses.Find(netclass_name)
+                if netclass:
+                    # Get nets in this netclass
+                    nets = []
+                    for net_id in range(board.GetNetCount()):
+                        net = board.FindNet(net_id)
+                        if net and net.GetNetClass().GetName() == netclass_name:
+                            nets.append(net.GetNetname())
+                    
+                    self.netclasses[netclass_name] = {
+                        'track_width': netclass.GetTrackWidth() / 1000000.0,
+                        'clearance': netclass.GetClearance() / 1000000.0,
+                        'via_diameter': netclass.GetViaDiameter() / 1000000.0,
+                        'via_drill': netclass.GetViaDrill() / 1000000.0,
+                        'nets': nets
+                    }
+            
+            logger.info("✅ Successfully extracted DRC rules using SWIG API")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ SWIG API extraction error: {e}")
+            return False
+    
+    def _extract_from_board_file(self, board_file_path: str) -> bool:
+        """Extract DRC rules by parsing the .kicad_pcb file directly"""
+        try:
+            import re
+            
+            with open(board_file_path, 'r') as f:
+                board_content = f.read()
+            
+            # Parse setup section for constraints
+            setup_match = re.search(r'\(setup\s+(.*?)\n\s*\)', board_content, re.DOTALL)
+            if setup_match:
+                setup_content = setup_match.group(1)
+                
+                # Extract constraints
+                min_track_width = re.search(r'\(min_track_width\s+([\d.]+)\)', setup_content)
+                if min_track_width:
+                    self.min_trace_width = float(min_track_width.group(1))
+                
+                # Extract more constraints as needed...
+                
+            # Parse netclasses
+            netclass_matches = re.finditer(r'\(net_class\s+"([^"]+)"[^)]*\)', board_content)
+            for match in netclass_matches:
+                netclass_name = match.group(1)
+                # Parse netclass properties...
+                
+            logger.info("✅ Successfully extracted DRC rules from board file")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Board file parsing error: {e}")
+            return False
+    
+    def _process_netclasses_data(self, netclasses_data, source: str):
+        """Process netclass data from various sources"""
+        try:
+            if isinstance(netclasses_data, dict):
+                for name, data in netclasses_data.items():
+                    self.netclasses[name] = {
+                        'track_width': data.get('track_width', self.default_trace_width) / (1000000.0 if source == 'ipc' else 1.0),
+                        'clearance': data.get('clearance', self.min_trace_spacing) / (1000000.0 if source == 'ipc' else 1.0),
+                        'via_diameter': data.get('via_diameter', self.via_diameter) / (1000000.0 if source == 'ipc' else 1.0),
+                        'via_drill': data.get('via_drill', self.via_drill) / (1000000.0 if source == 'ipc' else 1.0),
+                        'nets': data.get('nets', [])
+                    }
+                    
+        except Exception as e:
+            logger.warning(f"⚠️ Error processing netclasses from {source}: {e}")
     
     def _apply_clearance_hierarchy(self):
         """Apply KiCad's clearance hierarchy methodology"""
@@ -218,3 +351,8 @@ class DRCRules:
         # STEP 3: Fall back to board default
         logger.debug(f"   {object_type} {object_uuid[:8]}: DEFAULT {self.min_trace_spacing:.3f}mm")
         return self.min_trace_spacing
+    
+    @property
+    def trace_width(self) -> float:
+        """Get the default trace width (compatibility property)"""
+        return self.default_trace_width

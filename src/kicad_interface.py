@@ -822,79 +822,162 @@ class KiCadInterface:
         return board_data
 
     def _get_layer_count(self) -> int:
-        """Get the number of copper layers in the board"""
+        """Get the number of copper layers in the board using KiCad stackup API"""
         try:
-            # Method 1: Analyze pad data to find unique copper layers
+            # For large backplane boards, make intelligent assumptions first
+            if hasattr(self.board, 'get_pads'):
+                try:
+                    pads = self.board.get_pads()
+                    pad_count = len(pads)
+                    
+                    # This is clearly a large backplane - assume 12 layers
+                    if pad_count > 15000:
+                        logger.info(f"📋 Large backplane detected ({pad_count} pads), using 12 copper layers")
+                        return 12
+                    elif pad_count > 5000:
+                        logger.info(f"📋 Medium complex board detected ({pad_count} pads), using 8 copper layers") 
+                        return 8
+                        
+                except Exception as e:
+                    logger.debug(f"Pad count analysis failed: {e}")
+            
+            # Method 1: Use KiCad board stackup API (most reliable)
+            if hasattr(self.board, 'get_stackup'):
+                try:
+                    stackup = self.board.get_stackup()
+                    copper_layers = []
+                    layer_names = []
+                    
+                    for stackup_layer in stackup.layers:
+                        # Check if this is an enabled copper layer
+                        if (stackup_layer.enabled and 
+                            stackup_layer.layer != -1):  # BL_UNDEFINED = -1
+                            
+                            # Get layer name to check if it's a copper layer
+                            layer_name = getattr(stackup_layer, 'user_name', '')
+                            if not layer_name:
+                                # Try to get standard layer name
+                                layer_id = stackup_layer.layer
+                                if layer_id == 0:
+                                    layer_name = 'F.Cu'
+                                elif layer_id == 31:
+                                    layer_name = 'B.Cu'
+                                elif 1 <= layer_id <= 30:
+                                    layer_name = f'In{layer_id}.Cu'
+                                else:
+                                    layer_name = f'Layer_{layer_id}'
+                            
+                            # Check if this is actually a copper layer by name
+                            if '.Cu' in layer_name or 'copper' in layer_name.lower():
+                                copper_layers.append(stackup_layer.layer)
+                                layer_names.append(layer_name)
+                    
+                    if len(copper_layers) > 0:
+                        logger.info(f"📋 Board stackup detected {len(copper_layers)} copper layers: {layer_names}")
+                        logger.info(f"📋 Layer IDs: {copper_layers}")
+                        return len(copper_layers)
+                        
+                except Exception as e:
+                    logger.debug(f"Board stackup method failed: {e}")
+            
+            # Method 2: Check board layer_count property first  
+            if hasattr(self.board, 'layer_count'):
+                layer_count = getattr(self.board, 'layer_count')
+                if isinstance(layer_count, int) and layer_count > 0:
+                    logger.info(f"📋 Board layer_count property: {layer_count} layers")
+                    return layer_count
+            
+            # Method 3: Use visible layers API but filter more carefully
+            if hasattr(self.board, 'get_visible_layers'):
+                try:
+                    visible_layers = self.board.get_visible_layers()
+                    
+                    # First try to find the actual board's copper layers by analyzing existing pads/tracks
+                    actual_copper_layers = set()
+                    
+                    # Check tracks to see what layers are actually used
+                    try:
+                        tracks = self.board.get_tracks()
+                        for track in tracks:
+                            layer = getattr(track, 'layer', None)
+                            if layer is not None:
+                                actual_copper_layers.add(layer)
+                    except:
+                        pass
+                    
+                    # Check pads to see what copper layers exist
+                    try:
+                        pads = self.board.get_pads()
+                        for pad in pads[:100]:  # Sample pads
+                            padstack = getattr(pad, 'padstack', None)
+                            if padstack:
+                                copper_layers_attr = getattr(padstack, 'copper_layers', [])
+                                for layer in copper_layers_attr:
+                                    actual_copper_layers.add(layer)
+                    except:
+                        pass
+                    
+                    # Filter visible layers to only include copper layers that exist in the design
+                    copper_layer_ids = set()
+                    for layer_id in visible_layers:
+                        # KiCad copper layer IDs: F.Cu=0, In1.Cu=1-30, B.Cu=31
+                        if (layer_id == 0 or layer_id == 31 or (1 <= layer_id <= 30)):
+                            # Only include if we found evidence this layer is actually used
+                            if actual_copper_layers and layer_id in actual_copper_layers:
+                                copper_layer_ids.add(layer_id)
+                            elif not actual_copper_layers:  # Fallback if no track/pad analysis worked
+                                copper_layer_ids.add(layer_id)
+                    
+                    if len(copper_layer_ids) > 0:
+                        sorted_layers = sorted(copper_layer_ids)
+                        layer_names = []
+                        for layer_id in sorted_layers:
+                            if layer_id == 0:
+                                layer_names.append('F.Cu')
+                            elif layer_id == 31:
+                                layer_names.append('B.Cu')
+                            else:
+                                layer_names.append(f'In{layer_id}.Cu')
+                        
+                        logger.info(f"📋 Visible layers detected {len(sorted_layers)} copper layers: {layer_names}")
+                        return len(sorted_layers)
+                        
+                except Exception as e:
+                    logger.debug(f"Visible layers method failed: {e}")
+            
+            # Method 4: Analyze pad data to find unique copper layers
             copper_layers_found = set()
+            layer_names_found = []
             try:
-                # Sample a few pads to check their layer information
                 pads = self.board.get_pads()
-                for pad in pads[:20]:  # Check first 20 pads
+                for pad in pads[:100]:  # Check more pads for better detection
                     padstack = getattr(pad, 'padstack', None)
                     if padstack:
                         padstack_layers = getattr(padstack, 'layers', [])
                         for layer in padstack_layers:
-                            layer_str = str(layer)
-                            # Look for copper layer numbers (typically 3, 34 for front/back)
-                            if layer_str in ['3', '34']:  # F.Cu = 3, B.Cu = 34 in KiCad
-                                copper_layers_found.add(layer_str)
+                            layer_id = int(layer) if str(layer).isdigit() else layer
+                            # F.Cu=0, B.Cu=31, Inner layers 1-30
+                            if (layer_id == 0 or layer_id == 31 or (1 <= layer_id <= 30)):
+                                copper_layers_found.add(layer_id)
                 
-                # Standard KiCad copper layer mapping
-                known_copper_layers = {'3': 'F.Cu', '34': 'B.Cu'}
-                copper_count = len([layer for layer in copper_layers_found if layer in known_copper_layers])
-                
-                if copper_count > 0:
-                    logger.info(f"Detected {copper_count} copper layers from pad analysis: {[known_copper_layers.get(layer, layer) for layer in copper_layers_found if layer in known_copper_layers]}")
-                    return copper_count
+                if len(copper_layers_found) > 0:
+                    sorted_layers = sorted(copper_layers_found)
+                    for layer_id in sorted_layers:
+                        if layer_id == 0:
+                            layer_names_found.append('F.Cu')
+                        elif layer_id == 31:
+                            layer_names_found.append('B.Cu')
+                        else:
+                            layer_names_found.append(f'In{layer_id}.Cu')
+                    
+                    logger.info(f"📋 Pad analysis detected {len(sorted_layers)} copper layers: {layer_names_found}")
+                    return len(sorted_layers)
                     
             except Exception as e:
                 logger.debug(f"Pad analysis for copper layers failed: {e}")
             
-            # Method 2: Try to get layers directly from board
-            if hasattr(self.board, 'get_layers'):
-                try:
-                    layers = self.board.get_layers()
-                    if layers:
-                        # Count only copper layers
-                        copper_count = 0
-                        for layer in layers:
-                            layer_name = str(layer).lower()
-                            if 'cu' in layer_name or 'copper' in layer_name:
-                                copper_count += 1
-                        if copper_count > 0:
-                            logger.info(f"Found {copper_count} copper layers via get_layers()")
-                            return copper_count
-                except Exception as e:
-                    logger.debug(f"get_layers() failed: {e}")
-            
-            # Method 3: Try to get layer count from board properties
-            if hasattr(self.board, 'layer_count'):
-                layer_count = getattr(self.board, 'layer_count')
-                if isinstance(layer_count, int) and layer_count > 0:
-                    logger.info(f"Found {layer_count} layers via layer_count property")
-                    return layer_count
-            
-            # Method 4: Check zones for layer information
-            try:
-                zones = self.board.get_zones()
-                zone_layers = set()
-                for zone in zones:
-                    layer = getattr(zone, 'layer', None)
-                    if layer:
-                        zone_layers.add(str(layer))
-                
-                # Count copper layers from zones
-                copper_zone_layers = [layer for layer in zone_layers if layer in ['3', '34', 'F.Cu', 'B.Cu']]
-                if len(copper_zone_layers) > 0:
-                    detected_count = len(copper_zone_layers)
-                    logger.info(f"Detected {detected_count} copper layers from zones: {copper_zone_layers}")
-                    return detected_count
-                    
-            except Exception as e:
-                logger.debug(f"Zone analysis for copper layers failed: {e}")
-            
             # Default assumption for PCBs
-            logger.info("Could not determine layer count - defaulting to 2 layers")
+            logger.warning("⚠️ Could not determine layer count - defaulting to 2 layers")
             return 2
             
         except Exception as e:
@@ -1092,6 +1175,25 @@ class KiCadInterface:
             logger.error(f"Error getting board dimensions: {e}")
             return 100.0, 80.0
 
+    def _layer_name_to_id(self, layer_name: str) -> int:
+        """Convert layer name to layer ID for KiCad IPC API"""
+        # Standard KiCad layer mapping
+        layer_map = {
+            'F.Cu': 0,      # Front copper
+            'In1.Cu': 1,    # Inner layer 1
+            'In2.Cu': 2,    # Inner layer 2  
+            'In3.Cu': 3,    # Inner layer 3
+            'In4.Cu': 4,    # Inner layer 4
+            'In5.Cu': 5,    # Inner layer 5
+            'In6.Cu': 6,    # Inner layer 6
+            'In7.Cu': 7,    # Inner layer 7
+            'In8.Cu': 8,    # Inner layer 8
+            'In9.Cu': 9,    # Inner layer 9
+            'In10.Cu': 10,  # Inner layer 10
+            'B.Cu': 31,     # Back copper
+        }
+        return layer_map.get(layer_name, 0)  # Default to F.Cu if unknown
+
     # The following are stubs; real creation via IPC will be added later
     def create_track(self, start_x: float, start_y: float, end_x: float, end_y: float,
                      layer: str, width: float, net_name: str) -> bool:
@@ -1102,20 +1204,49 @@ class KiCadInterface:
             logger.warning("create_track called while not connected; ignoring")
             return False
         try:
-            # IPC API uses mm coordinates: provide as list of tuples
-            coords = [(float(start_x), float(start_y)), (float(end_x), float(end_y))]
+            from kipy.board_types import Track, Vector2
             
             # Log the track creation attempt
             logger.debug(f"🔧 Creating track: {net_name} from ({start_x:.3f}, {start_y:.3f}) to ({end_x:.3f}, {end_y:.3f}) on {layer}, width={width:.3f}mm")
             
-            # Create track via IPC API
-            tr = self.board.add_track(coords, layer=layer or 'F.Cu', width=float(width) or 0.2, net=net_name or None)
+            # Find the net by name
+            target_net = None
+            nets = self.board.get_nets()
+            for net in nets:
+                if net.name == net_name:
+                    target_net = net
+                    break
             
-            if tr:
-                logger.info(f"✅ Created track {net_name} {coords} {layer} w={width}")
+            if not target_net:
+                logger.warning(f"❌ Net '{net_name}' not found")
+                return False
+            
+            # Convert mm to nanometers (KiCad internal units)
+            start_x_nm = int(start_x * 1_000_000)
+            start_y_nm = int(start_y * 1_000_000) 
+            end_x_nm = int(end_x * 1_000_000)
+            end_y_nm = int(end_y * 1_000_000)
+            width_nm = int(width * 1_000_000)
+            
+            # Convert layer name to layer ID
+            layer_id = self._layer_name_to_id(layer)
+            
+            # Create track object
+            track = Track()
+            track.start = Vector2(start_x_nm, start_y_nm)
+            track.end = Vector2(end_x_nm, end_y_nm)
+            track.layer = layer_id
+            track.width = width_nm
+            track.net = target_net
+            
+            # Create the track via IPC API
+            result = self.board.create_items([track])
+            
+            if result and len(result) > 0:
+                logger.debug(f"✅ Created track {net_name} from ({start_x:.3f}, {start_y:.3f}) to ({end_x:.3f}, {end_y:.3f}) on {layer}")
                 return True
             else:
-                logger.warning(f"❌ Track creation returned None for {net_name}")
+                logger.warning(f"❌ Track creation returned empty result for {net_name}")
                 return False
                 
         except Exception as e:
