@@ -47,13 +47,9 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# Grid constants based on specifications
-GRID_RESOLUTION = 0.4  # mm - 0.4mm grid pitch
-TRACE_WIDTH = 0.08890  # mm - 3.5mil trace width
-TRACE_SPACING = 0.08890  # mm - 3.5mil spacing
-VIA_HOLE_SIZE = 0.15  # mm - via hole diameter
-VIA_DIAMETER = 0.25  # mm - via diameter
-BOARD_MARGIN = 3.0  # mm - margin around airwires for routing bounds
+# Default values (used as fallbacks if DRC rules unavailable)
+DEFAULT_GRID_RESOLUTION = 0.4  # mm - 0.4mm grid pitch
+DEFAULT_BOARD_MARGIN = 3.0  # mm - margin around airwires for routing bounds
 
 # Cell states in the routing grid
 class CellState:
@@ -127,9 +123,13 @@ class RoutingGrid:
         self.width = self.max_x - self.min_x
         self.height = self.max_y - self.min_y
         
-        # Grid size in cells
-        self.grid_cols = int(math.ceil(self.width / GRID_RESOLUTION))
-        self.grid_rows = int(math.ceil(self.height / GRID_RESOLUTION))
+        # Grid size in cells - use GridConfig resolution or fallback
+        grid_resolution = getattr(board_interface, 'grid_config', None)
+        grid_resolution = grid_resolution.resolution if grid_resolution else DEFAULT_GRID_RESOLUTION
+        
+        self.grid_cols = int(math.ceil(self.width / grid_resolution))
+        self.grid_rows = int(math.ceil(self.height / grid_resolution))
+        self.grid_resolution = grid_resolution
         
         # Initialize grid arrays
         self.grid_state = np.zeros((self.layer_count, self.grid_rows, self.grid_cols), dtype=np.int32)
@@ -177,14 +177,14 @@ class RoutingGrid:
     
     def world_to_grid(self, x: float, y: float) -> Tuple[int, int]:
         """Convert world coordinates to grid indices"""
-        grid_x = int((x - self.min_x) / GRID_RESOLUTION)
-        grid_y = int((y - self.min_y) / GRID_RESOLUTION)
+        grid_x = int((x - self.min_x) / self.grid_resolution)
+        grid_y = int((y - self.min_y) / self.grid_resolution)
         return max(0, min(grid_x, self.grid_cols - 1)), max(0, min(grid_y, self.grid_rows - 1))
     
     def grid_to_world(self, grid_x: int, grid_y: int) -> Tuple[float, float]:
         """Convert grid indices to world coordinates"""
-        x = self.min_x + (grid_x + 0.5) * GRID_RESOLUTION
-        y = self.min_y + (grid_y + 0.5) * GRID_RESOLUTION
+        x = self.min_x + (grid_x + 0.5) * self.grid_resolution
+        y = self.min_y + (grid_y + 0.5) * self.grid_resolution
         return x, y
     
     def is_valid_position(self, x: int, y: int, layer: int) -> bool:
@@ -301,9 +301,9 @@ class GPUManhattanRouter(BaseRouter):
                 min_y = min(min_y, y)
                 max_y = max(max_y, y)
         
-        # Add 3mm margin
-        return (min_x - BOARD_MARGIN, min_y - BOARD_MARGIN, 
-                max_x + BOARD_MARGIN, max_y + BOARD_MARGIN)
+        # Add configurable margin
+        return (min_x - DEFAULT_BOARD_MARGIN, min_y - DEFAULT_BOARD_MARGIN, 
+                max_x + DEFAULT_BOARD_MARGIN, max_y + DEFAULT_BOARD_MARGIN)
     
     def _initialize_routing_grid(self):
         """Initialize the routing grid with obstacles from footprints"""
@@ -377,7 +377,7 @@ class GPUManhattanRouter(BaseRouter):
                 
                 # Calculate proper pad clearance from DRC rules
                 pad_clearance = self.drc_rules.get_clearance_for_net(net_id)
-                clearance_cells = int(math.ceil(pad_clearance / GRID_RESOLUTION))
+                clearance_cells = int(math.ceil(pad_clearance / self.routing_grid.grid_resolution))
                 
                 # Mark areas accessible to this net (for escape routing)
                 for dx in range(-clearance_cells, clearance_cells + 1):
@@ -508,7 +508,8 @@ class GPUManhattanRouter(BaseRouter):
                 point.x, point.y, point.layer, CellState.ROUTED, net_hash)
         
         # Add spacing halos around the path
-        spacing_halo = int(math.ceil(TRACE_SPACING / GRID_RESOLUTION))
+        trace_spacing = self.drc_rules.min_trace_spacing
+        spacing_halo = int(math.ceil(trace_spacing / self.routing_grid.grid_resolution))
         
         for point in path:
             for dx in range(-spacing_halo, spacing_halo + 1):
@@ -543,7 +544,7 @@ class GPUManhattanRouter(BaseRouter):
             if abs(escape_x - pad_x) > 0.001 or abs(escape_y - pad_y) > 0.001:  # Non-zero length
                 escape_segment = RouteSegment(
                     'track', pad_x, pad_y, escape_x, escape_y, 
-                    TRACE_WIDTH, 'F.Cu', net_id
+                    self.drc_rules.default_trace_width, 'F.Cu', net_id
                 )
                 segments.append(escape_segment)
             
@@ -555,8 +556,8 @@ class GPUManhattanRouter(BaseRouter):
             via_data = {
                 'x': escape_x,
                 'y': escape_y,
-                'size': VIA_DIAMETER,
-                'drill': VIA_HOLE_SIZE,
+                'size': self.drc_rules.via_diameter,
+                'drill': self.drc_rules.via_drill,
                 'layers': ['F.Cu', entry_layer_name],
                 'net': net_id,
                 'type': 'blind'
@@ -708,7 +709,7 @@ class GPUManhattanRouter(BaseRouter):
                 
                 segment = RouteSegment(
                     'track', curr_world[0], curr_world[1], next_world[0], next_world[1],
-                    TRACE_WIDTH, layer_name, net_id
+                    self.drc_rules.default_trace_width, layer_name, net_id
                 )
                 segments.append(segment)
                 
@@ -718,7 +719,7 @@ class GPUManhattanRouter(BaseRouter):
                         'start': curr_world,
                         'end': next_world,
                         'layer': layer_name,
-                        'width': TRACE_WIDTH,
+                        'width': self.drc_rules.default_trace_width,
                         'net': net_id,
                         'color': 'white'  # Bright white for current routing
                     }
@@ -731,8 +732,8 @@ class GPUManhattanRouter(BaseRouter):
                 via_data = {
                     'x': curr_world[0],
                     'y': curr_world[1],
-                    'size': VIA_DIAMETER,
-                    'drill': VIA_HOLE_SIZE,
+                    'size': self.drc_rules.via_diameter,
+                    'drill': self.drc_rules.via_drill,
                     'layers': [from_layer_name, to_layer_name],
                     'net': net_id,
                     'type': self._determine_via_type(current.layer, next_point.layer)
@@ -971,7 +972,7 @@ class GPUManhattanRouter(BaseRouter):
             # F.Cu escape from pad_a to grid
             escape_a = RouteSegment(
                 'track', pad_a['x'], pad_a['y'], start_world[0], start_world[1],
-                TRACE_WIDTH, 'F.Cu', net_name
+                self.drc_rules.default_trace_width, 'F.Cu', net_name
             )
             segments.append(escape_a)
             
@@ -982,7 +983,7 @@ class GPUManhattanRouter(BaseRouter):
             # F.Cu escape from grid to pad_b
             escape_b = RouteSegment(
                 'track', end_world[0], end_world[1], pad_b['x'], pad_b['y'],
-                TRACE_WIDTH, 'F.Cu', net_name
+                self.drc_rules.default_trace_width, 'F.Cu', net_name
             )
             segments.append(escape_b)
             
