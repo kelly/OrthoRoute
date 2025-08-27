@@ -99,7 +99,7 @@ class RichKiCadInterface:
                     if docs and len(docs) > 0:
                         # Use first open document
                         self.board = docs[0]
-                        logger.info(f"✅ Retrieved board from open documents: {getattr(self.board, 'name', 'Unknown')}")
+                        logger.info(f"Retrieved board from open documents: {getattr(self.board, 'name', 'Unknown')}")
                     else:
                         raise Exception("No open documents found")
                 except Exception as e2:
@@ -114,7 +114,7 @@ class RichKiCadInterface:
             return True
 
         except Exception as e:
-            logger.error(f"❌ Failed to connect to KiCad: {e}")
+            logger.error(f"Failed to connect to KiCad: {e}")
             self.connected = False
             return False
 
@@ -187,6 +187,8 @@ class RichKiCadInterface:
             logger.info("Extracting nets with connectivity...")
             nets_data = self._extract_nets(board, pads)
             routable_nets = [net for net in nets_data.values() if len(net.get('pads', [])) >= 2]
+            
+            
             logger.info(f"Found {len(nets_data)} nets with pads")
             logger.info(f"Created {len(routable_nets)} routable nets (excluding 0 plane-connected nets)")
             

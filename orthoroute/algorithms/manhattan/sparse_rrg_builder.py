@@ -27,14 +27,17 @@ class SparseRRGBuilder:
         self.max_y = 0.0
         
         # Hierarchical grid parameters  
-        self.coarse_pitch = 0.4   # mm - Same as fine pitch for maximum routing quality
-        self.fine_pitch = 0.4     # mm - fine local routing grid around pads
+        self.coarse_pitch = 0.2   # mm - Original working pitch
+        self.fine_pitch = 0.2     # mm - Stable resolution with manageable RAM usage
         
         self.coarse_cols = 0
         self.coarse_rows = 0
         
         # Track local routing areas around pads
         self.local_areas = []  # List of (min_x, min_y, max_x, max_y) fine grid areas
+        
+        # Store grid positions for tap generation
+        self.grid_x_positions = []  # Vertical rail X positions
         
     def build_fabric(self, board_bounds: Tuple[float, float, float, float], 
                     pads: List[Pad], airwires: List[Dict] = None) -> RoutingResourceGraph:
@@ -55,17 +58,18 @@ class SparseRRGBuilder:
         
         logger.info(f"Building Sparse RRG for {board_width:.1f}x{board_height:.1f}mm active area")
         
-        # Step 1: Build coarse global routing grid
-        self._build_coarse_global_grid()
+        # FULL GRID MODE: Ultra-dense routing with 16GB GPU memory
+        logger.info("FULL GRID MODE: Building ultra-dense routing grid (16GB capacity)")
         
-        # Step 2: Identify local routing areas around pads
+        # Step 1: SKIPPED - no global grid needed in full mode
+        
+        # Step 2: Identify single massive routing area  
         self._identify_local_areas(pads)
         
-        # Step 3: Build fine local grids in pad areas
+        # Step 3: Build complete dense grid
         self._build_fine_local_grids()
         
-        # Step 4: Connect local areas to global grid
-        self._connect_local_to_global()
+        # Step 4: SKIPPED - no local-to-global connections needed
         
         # Step 5: Connect pads to local grids
         self._connect_pads_to_local_grids(pads)
@@ -74,6 +78,10 @@ class SparseRRGBuilder:
         self._validate_fabric_connectivity()
         
         self._report_fabric_stats()
+        
+        # Sort and deduplicate grid X positions
+        self.grid_x_positions = sorted(list(set(self.grid_x_positions)))
+        logger.info(f"Generated {len(self.grid_x_positions)} unique vertical rail positions")
         
         return self.rrg
     
@@ -144,7 +152,7 @@ class SparseRRGBuilder:
         self.coarse_rows = max(5, int(math.ceil(height_mm / self.coarse_pitch)))
         
         # Sanity check - limit global grid size for very large boards
-        max_global_cells = 2000000  # 2M cells = ~1GB for 16GB GPU, enabling 0.4mm pitch
+        max_global_cells = 100000   # 100K cells = ~50MB - extremely sparse, net-driven only
         if self.coarse_cols * self.coarse_rows > max_global_cells:
             scale_factor = math.sqrt(max_global_cells / (self.coarse_cols * self.coarse_rows))
             self.coarse_cols = max(10, int(self.coarse_cols * scale_factor))
@@ -227,9 +235,9 @@ class SparseRRGBuilder:
                             )
                             self.rrg.add_edge(edge)
         
-        # Add sparse global switch boxes (every 4th intersection to reduce memory)
-        for col in range(0, self.coarse_cols, 4):
-            for row in range(0, self.coarse_rows, 4):
+        # Add DENSE global switch boxes for better routing (every 2nd intersection)
+        for col in range(0, self.coarse_cols, 2):
+            for row in range(0, self.coarse_rows, 2):
                 self._add_global_switch_box(col, row)
     
     def _add_global_switch_box(self, col: int, row: int):
@@ -268,6 +276,11 @@ class SparseRRGBuilder:
                     src = from_node_id if direction == 'up' else to_node_id
                     dst = to_node_id if direction == 'up' else from_node_id
                     
+                    # Calculate real elevator capacity based on column height and via pitch
+                    via_pitch_mm = 0.4  # Standard blind/buried via pitch 
+                    column_height_mm = 3.2 * (to_layer - from_layer)  # PCB layer thickness
+                    elevator_capacity = max(1, int(column_height_mm / via_pitch_mm))
+                    
                     edge_id = f"global_switch_{src}_to_{dst}"
                     edge = RRGEdge(
                         id=edge_id,
@@ -275,7 +288,8 @@ class SparseRRGBuilder:
                         from_node=src,
                         to_node=dst,
                         length_mm=0.0,
-                        base_cost=switch_cost
+                        base_cost=switch_cost,
+                        capacity=elevator_capacity
                     )
                     self.rrg.add_edge(edge)
     
@@ -283,25 +297,25 @@ class SparseRRGBuilder:
         """Identify areas that need fine routing grids around pads"""
         self.local_areas = []
         
-        # Group pads by proximity - LARGER clusters for better connectivity
-        pad_clusters = self._cluster_pads(pads, cluster_radius=10.0)  # 10mm clusters (was 5mm)
+        # FULL GRID MODE: Create ultra-dense grid using full 16GB capacity
+        # Maximum resolution routing for enterprise backplanes
+        logger.info("FULL GRID MODE: Creating ultra-dense routing grid (16GB memory)")
+        
+        # Single massive cluster covering entire active area
+        pad_clusters = [pads]  # All pads in one cluster
         
         for cluster in pad_clusters:
-            # Calculate bounding box for cluster - LARGER margins
-            min_x = min(pad.x_mm for pad in cluster) - 4.0  # 4mm margin (was 2mm)
-            max_x = max(pad.x_mm for pad in cluster) + 4.0
-            min_y = min(pad.y_mm for pad in cluster) - 4.0
-            max_y = max(pad.y_mm for pad in cluster) + 4.0
+            # FULL GRID: Use entire active routing area
+            min_x = self.min_x
+            max_x = self.max_x  
+            min_y = self.min_y
+            max_y = self.max_y
             
-            # Clamp to board bounds
-            min_x = max(min_x, self.min_x)
-            max_x = min(max_x, self.max_x)
-            min_y = max(min_y, self.min_y)
-            max_y = min(max_y, self.max_y)
-            
+            # Single massive local area covering everything
             self.local_areas.append((min_x, min_y, max_x, max_y))
+            logger.info(f"FULL GRID: Created single dense area {max_x-min_x:.1f}×{max_y-min_y:.1f}mm")
         
-        logger.info(f"Created {len(self.local_areas)} local routing areas")
+        logger.info(f"ULTRA-DENSE MODE: Using {len(self.local_areas)} complete routing area (16GB capacity)")
     
     def _cluster_pads(self, pads: List[Pad], cluster_radius: float) -> List[List[Pad]]:
         """Cluster pads by proximity"""
@@ -339,15 +353,14 @@ class SparseRRGBuilder:
             width = max_x - min_x
             height = max_y - min_y
             
-            # Calculate local grid dimensions
-            local_cols = max(3, int(math.ceil(width / self.fine_pitch)))
-            local_rows = max(3, int(math.ceil(height / self.fine_pitch)))
+            # Calculate FULL grid dimensions for RTX 5090
+            local_cols = int(math.ceil(width / self.fine_pitch))
+            local_rows = int(math.ceil(height / self.fine_pitch))
             
-            # Limit local area size for memory efficiency - INCREASED limits
-            if local_cols * local_rows > 1600:  # Max 40x40 local grid (was 20x20)
-                scale = math.sqrt(1600 / (local_cols * local_rows))
-                local_cols = max(10, int(local_cols * scale))  # Min 10x10 (was 5x5)
-                local_rows = max(10, int(local_rows * scale))
+            # RTX 5090 MODE: No memory limits - use full resolution
+            grid_cells = local_cols * local_rows
+            estimated_memory_gb = (grid_cells * self.rrg.layer_count * 50) / (1024**3)  # 50 bytes per cell estimate
+            logger.info(f"ULTRA-DENSE: {local_cols}×{local_rows}×{self.rrg.layer_count} = {grid_cells * self.rrg.layer_count:,} cells (~{estimated_memory_gb:.1f}GB)")
             
             logger.debug(f"Local area {area_idx}: {local_cols}×{local_rows} @ {self.fine_pitch}mm")
             
@@ -390,6 +403,10 @@ class SparseRRGBuilder:
                 elif direction == 'V':
                     for col in range(local_cols):
                         x_pos = min_x + (col + 0.5) * (width / local_cols)
+                        
+                        # Store grid X positions for tap generation
+                        if x_pos not in self.grid_x_positions:
+                            self.grid_x_positions.append(x_pos)
                         
                         for row in range(local_rows - 1):
                             y_center = min_y + (row + 0.5) * (height / local_rows)
@@ -458,6 +475,11 @@ class SparseRRGBuilder:
                     src = from_node_id if direction == 'up' else to_node_id
                     dst = to_node_id if direction == 'up' else from_node_id
                     
+                    # Calculate real elevator capacity based on column height and via pitch
+                    via_pitch_mm = 0.4  # Standard blind/buried via pitch
+                    column_height_mm = 3.2 * (to_layer - from_layer)  # PCB layer thickness
+                    elevator_capacity = max(1, int(column_height_mm / via_pitch_mm))
+                    
                     edge_id = f"local_switch_{src}_to_{dst}"
                     edge = RRGEdge(
                         id=edge_id,
@@ -465,12 +487,15 @@ class SparseRRGBuilder:
                         from_node=src,
                         to_node=dst,
                         length_mm=0.0,
-                        base_cost=switch_cost
+                        base_cost=switch_cost,
+                        capacity=elevator_capacity
                     )
                     self.rrg.add_edge(edge)
     
     def _connect_local_to_global(self):
-        """Connect local areas to global grid"""
+        """Connect local areas to global grid with DENSE connectivity"""
+        connections_created = 0
+        
         for area_idx, (min_x, min_y, max_x, max_y) in enumerate(self.local_areas):
             # Find nearest global grid points
             center_x = (min_x + max_x) / 2
@@ -483,39 +508,56 @@ class SparseRRGBuilder:
             global_col = max(0, min(global_col, self.coarse_cols - 1))
             global_row = max(0, min(global_row, self.coarse_rows - 1))
             
-            # Connect a few local nodes to global grid
+            # DENSE CONNECTIVITY: Connect MULTIPLE local nodes to global grid
             for layer_idx in range(self.rrg.layer_count):
                 direction = self.rrg.layer_directions[layer_idx]
                 
-                # Find local and global node IDs
-                local_node_id = None
-                global_node_id = None
+                # Connect multiple local grid points per area (not just R0_C0)
+                connection_points = []
+                max_local_connections = 4  # Connect up to 4x4 grid of local nodes
                 
                 if direction == 'H':
-                    local_node_id = f"local_{area_idx}_bus_L{layer_idx}_R0_C0"
-                    if global_row < self.coarse_rows:
-                        global_node_id = f"global_bus_L{layer_idx}_R{global_row}_C{global_col}"
+                    # Connect multiple rows to global horizontal buses
+                    for local_row in range(max_local_connections):
+                        for local_col in range(max_local_connections):
+                            local_node_id = f"local_{area_idx}_bus_L{layer_idx}_R{local_row}_C{local_col}"
+                            if local_node_id in self.rrg.nodes:
+                                connection_points.append(local_node_id)
+                                
                 elif direction == 'V':
-                    local_node_id = f"local_{area_idx}_rail_L{layer_idx}_C0_R0"
-                    if global_col < self.coarse_cols:
-                        global_node_id = f"global_rail_L{layer_idx}_C{global_col}_R{global_row}"
+                    # Connect multiple columns to global vertical rails
+                    for local_col in range(max_local_connections):
+                        for local_row in range(max_local_connections):
+                            local_node_id = f"local_{area_idx}_rail_L{layer_idx}_C{local_col}_R{local_row}"
+                            if local_node_id in self.rrg.nodes:
+                                connection_points.append(local_node_id)
                 
-                # Create connection if both nodes exist
-                if (local_node_id and global_node_id and 
-                    local_node_id in self.rrg.nodes and global_node_id in self.rrg.nodes):
-                    
-                    # Bidirectional connection
-                    for src, dst in [(local_node_id, global_node_id), (global_node_id, local_node_id)]:
-                        edge_id = f"connector_{src}_to_{dst}"
-                        edge = RRGEdge(
-                            id=edge_id,
-                            edge_type=EdgeType.TRACK,
-                            from_node=src,
-                            to_node=dst,
-                            length_mm=1.0,  # Small connector cost
-                            base_cost=self.config.k_length * 1.0
-                        )
-                        self.rrg.add_edge(edge)
+                # Find corresponding global node
+                global_node_id = None
+                if direction == 'H' and global_row < self.coarse_rows:
+                    global_node_id = f"global_bus_L{layer_idx}_R{global_row}_C{global_col}"
+                elif direction == 'V' and global_col < self.coarse_cols:
+                    global_node_id = f"global_rail_L{layer_idx}_C{global_col}_R{global_row}"
+                
+                # Create DENSE bidirectional connections
+                if global_node_id and global_node_id in self.rrg.nodes:
+                    for local_node_id in connection_points:
+                        # Bidirectional connection
+                        for src, dst in [(local_node_id, global_node_id), (global_node_id, local_node_id)]:
+                            edge_id = f"connector_{src}_to_{dst}"
+                            if edge_id not in self.rrg.edges:  # Avoid duplicates
+                                edge = RRGEdge(
+                                    id=edge_id,
+                                    edge_type=EdgeType.TRACK,
+                                    from_node=src,
+                                    to_node=dst,
+                                    length_mm=0.5,  # Low cost for local-global connections
+                                    base_cost=self.config.k_length * 0.5
+                                )
+                                self.rrg.add_edge(edge)
+                                connections_created += 1
+        
+        logger.info(f"Created {connections_created} dense local-to-global connections")
     
     def _connect_pads_to_local_grids(self, pads: List[Pad]):
         """Connect pads to their local grids"""

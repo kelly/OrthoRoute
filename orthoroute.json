@@ -6,9 +6,9 @@
     "use_gpu": true,
     "parallel_routing": true,
     "optimization_passes": 2,
-    "default_track_width": 0.25,
-    "default_via_size": 0.6,
-    "default_via_drill": 0.3,
+    "default_track_width": 0.2,
+    "default_via_size": 0.8,
+    "default_via_drill": 0.4,
     "default_clearance": 0.2,
     "manhattan_grid_resolution": 0.05,
     "manhattan_layer_directions": {

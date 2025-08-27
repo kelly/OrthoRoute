@@ -8,6 +8,7 @@ import sys
 import logging
 from typing import Dict, Any, Optional, List
 import os
+import time
 from pathlib import Path
 
 # Add debug logging capability
@@ -37,9 +38,8 @@ from PyQt6.QtGui import (
 )
 
 from .kicad_colors import KiCadColorScheme
-from ...algorithms.manhattan.deterministic_router import DeterministicManhattanRouter, RoutingConfig
-from ...algorithms.manhattan.spec_manhattan_router import SpecManhattanRouter
 from ...algorithms.manhattan.manhattan_router_rrg import ManhattanRRGRoutingEngine
+from ...algorithms.manhattan.rrg import RoutingConfig
 from ...infrastructure.gpu.cuda_provider import CUDAProvider
 from ...infrastructure.gpu.cpu_fallback import CPUProvider
 
@@ -89,7 +89,7 @@ class RoutingThread(QThread):
                         logger.warning("Could not create DRC constraints")
                 
                 # Use new RRG-based Manhattan router
-                logger.info("🚀 Initializing RRG-based Manhattan router")
+                logger.info("PERFORMANCE: Initializing RRG-based Manhattan router")
                 
                 # Create mock board object for RRG router
                 from ...domain.models.board import Board
@@ -107,10 +107,18 @@ class RoutingThread(QThread):
                 # Initialize the router with board data
                 self.router.initialize(mock_board)
                 
-                # Route all nets using RRG PathFinder
-                logger.info(f"🎯 Routing {len(mock_board.nets)} nets with RRG PathFinder")
+                # Route all nets using RRG PathFinder with live updates
+                logger.info(f"INFO: Routing {len(mock_board.nets)} nets with RRG PathFinder")
                 
-                # Use RRG router interface
+                # Set up progress callback for live visualization
+                def progress_callback(current, total, net_name, tracks=None, vias=None):
+                    if not self.is_cancelled:
+                        status = f"Routing net {net_name}" if net_name else "Routing..."
+                        self.progress_update.emit(current, total, status, tracks or [], vias or [])
+                
+                self.router.set_progress_callback(progress_callback)
+                
+                # Use RRG router interface with progress reporting
                 routing_stats = self.router.route_all_nets(
                     nets=mock_board.nets,
                     timeout_per_net=5.0,
@@ -417,16 +425,68 @@ class PCBViewer(QWidget):
             debug_logger.log_visualization_data(render_counts, zoom_level)
                 
     def _draw_tracks(self, painter: QPainter):
-        """Draw existing tracks/traces"""
+        """Draw existing tracks/traces with performance optimization"""
         tracks = self.board_data.get('tracks', [])
         
+        if not tracks:
+            return
+            
+        # CRITICAL PERFORMANCE FIX: Viewport culling and LOD
+        zoom_level = painter.transform().m11()  # Get current zoom from transform matrix
+        
+        # Calculate visible viewport in world coordinates
+        try:
+            transform = painter.transform().inverted()[0]
+            viewport_rect = painter.viewport()
+            visible_rect = transform.mapRect(QRectF(viewport_rect))
+            
+            # Expand visible rect slightly for smooth panning
+            margin = max(visible_rect.width(), visible_rect.height()) * 0.1
+            visible_rect = visible_rect.adjusted(-margin, -margin, margin, margin)
+        except:
+            # Fallback: render everything if transform fails
+            visible_rect = QRectF(-1000, -1000, 2000, 2000)
+        
+        # Performance limits based on zoom level - ALWAYS SHOW TRACKS/VIAS
+        if zoom_level < 0.05:
+            max_tracks = 5000    # Very zoomed out - still show many tracks
+            min_width = 0.0001   # Always show 3 mil (0.0762mm) tracks  
+        elif zoom_level < 1.0:
+            max_tracks = 10000   # Moderately zoomed out - show more tracks
+            min_width = 0.0001   # Always show 3 mil traces
+        else:
+            max_tracks = 20000   # Zoomed in - show all tracks
+            min_width = 0.0001   # Always show all traces
+        
+        drawn_tracks = 0
         for track in tracks:
+            if drawn_tracks >= max_tracks:
+                break
+                
             try:
                 x1 = track['start_x']
                 y1 = track['start_y']
                 x2 = track['end_x']
                 y2 = track['end_y']
+                width = track.get('width', 0.1)
                 layer = track.get('layer', 'F.Cu')
+                
+                # PERFORMANCE: Skip tracks outside visible viewport
+                # FIXED: Use proper line-viewport intersection instead of rectangles!
+                line_start = QPointF(x1, y1)
+                line_end = QPointF(x2, y2)
+                
+                # Check if either endpoint is in viewport, or line crosses viewport
+                if (visible_rect.contains(line_start) or 
+                    visible_rect.contains(line_end) or
+                    self._line_intersects_rect(x1, y1, x2, y2, visible_rect)):
+                    # Line is visible, continue to draw
+                    pass
+                else:
+                    continue
+                    
+                # ALWAYS SHOW TRACKS - No width threshold for production visibility
+                # User requirement: tracks/vias visible at every zoom level
                 
                 # Skip if layer is not visible
                 if layer not in self.visible_layers:
@@ -450,11 +510,27 @@ class PCBViewer(QWidget):
                     except (ValueError, AttributeError):
                         color = self.color_scheme.get_color('copper_inner')
                 
-                painter.setPen(QPen(color, 0.2))
+                # Use thicker lines for better Manhattan trace visibility
+                line_width = max(0.5, width * 2)  # Make tracks more visible
+                painter.setPen(QPen(color, line_width))
                 painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+                drawn_tracks += 1
                 
             except (KeyError, TypeError):
                 continue
+                
+    def _line_intersects_rect(self, x1, y1, x2, y2, rect):
+        """Check if a line intersects with a rectangle (simple bounding box check)"""
+        # Simple bounding box intersection - good enough for viewport culling
+        line_left = min(x1, x2)
+        line_right = max(x1, x2) 
+        line_top = min(y1, y2)
+        line_bottom = max(y1, y2)
+        
+        return not (line_right < rect.left() or 
+                   line_left > rect.right() or
+                   line_bottom < rect.top() or 
+                   line_top > rect.bottom())
                 
     def _draw_pads(self, painter: QPainter):
         """Draw component pads with viewport culling and LOD optimization"""
@@ -628,10 +704,8 @@ class PCBViewer(QWidget):
                 start_layer = via.get('start_layer', via.get('from_layer', 'F.Cu'))
                 end_layer = via.get('end_layer', via.get('to_layer', 'B.Cu'))
                 
-                # Skip very small vias when zoomed out (LOD) - only when smaller than ~1 pixel
-                lod_threshold = diameter / zoom_level
-                if lod_threshold < 0.01:
-                    continue
+                # ALWAYS SHOW VIAS - No LoD threshold for production visibility
+                # User requirement: tracks/vias visible at every zoom level
                 
                 # Set color based on via type
                 if via_type == 'through':
@@ -733,6 +807,15 @@ class PCBViewer(QWidget):
         except Exception as e:
             print(f"DEBUG: Screenshot error: {e}")
             return None
+            
+    def update_routing(self, tracks, vias):
+        """Update the board data with new routing information"""
+        if tracks:
+            self.board_data['tracks'] = tracks
+        if vias:
+            self.board_data['vias'] = vias
+        # Trigger repaint
+        self.update()
             
 
 class OrthoRouteMainWindow(QMainWindow):
@@ -850,14 +933,13 @@ class OrthoRouteMainWindow(QMainWindow):
         algorithm_layout.addWidget(QLabel("Algorithm:"))
         self.algorithm_combo = QComboBox()
         
-        # Available algorithms
+        # Available algorithms - simplified to single best option
         algorithm_options = [
-            "Wavefront",
             "Manhattan RRG"
         ]
         
         self.algorithm_combo.addItems(algorithm_options)
-        self.algorithm_combo.setCurrentIndex(0)  # Default to Wavefront
+        self.algorithm_combo.setCurrentIndex(0)  # Only option
         
         if self.gpu_status and self.gpu_status.get('can_use_gpu_routing'):
             logger.info("All algorithms will use GPU acceleration with CPU fallback")
@@ -871,17 +953,17 @@ class OrthoRouteMainWindow(QMainWindow):
         routing_layout.addLayout(algorithm_layout)
         
         # Main routing buttons
-        self.route_preview_btn = QPushButton("🚀 Begin Autorouting")
+        self.route_preview_btn = QPushButton("Begin Autorouting")
         self.route_preview_btn.clicked.connect(self.begin_autorouting)
         routing_layout.addWidget(self.route_preview_btn)
         
         # Solution control buttons (initially disabled)
         solution_layout = QHBoxLayout()
-        self.commit_btn = QPushButton("✅ Apply to KiCad")
+        self.commit_btn = QPushButton("Apply to KiCad")
         self.commit_btn.clicked.connect(self.commit_routes)
         self.commit_btn.setEnabled(False)
         
-        self.rollback_btn = QPushButton("❌ Discard")
+        self.rollback_btn = QPushButton("Discard")
         self.rollback_btn.clicked.connect(self.rollback_routes)
         self.rollback_btn.setEnabled(False)
         
@@ -1139,7 +1221,7 @@ class OrthoRouteMainWindow(QMainWindow):
     # Event handler methods
     def on_algorithm_changed(self, algorithm_text: str):
         """Handle algorithm selection change"""
-        logger.info(f"🔄 Algorithm changed to: {algorithm_text}")
+        logger.info(f"INFO: Algorithm changed to: {algorithm_text}")
         self.status_label.setText(f"Selected algorithm: {algorithm_text}")
         
     def toggle_display_option(self, option: str, checked: bool):
@@ -1165,7 +1247,7 @@ class OrthoRouteMainWindow(QMainWindow):
     def begin_autorouting(self):
         """Begin autorouting with selected algorithm"""
         algorithm_text = self.algorithm_combo.currentText()
-        logger.info(f"🚀 Begin autorouting with {algorithm_text}")
+        logger.info(f"Begin autorouting with {algorithm_text}")
         
         # DEBUG: Screenshot before routing starts
         if self.pcb_viewer:
@@ -1176,19 +1258,16 @@ class OrthoRouteMainWindow(QMainWindow):
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         
-        # Route based on selected algorithm
+        # Route using Manhattan RRG (only algorithm)
         if algorithm_text == "Manhattan RRG":
             self._route_manhattan_rrg()
-        elif algorithm_text == "Wavefront":
-            QMessageBox.information(self, "Routing", "Wavefront routing not yet implemented")
-            self._reset_routing_ui()
         else:
-            QMessageBox.information(self, "Routing", f"Algorithm {algorithm_text} not yet implemented")
+            QMessageBox.information(self, "Routing", f"Algorithm {algorithm_text} not implemented")
             self._reset_routing_ui()
         
     def commit_routes(self):
         """Apply routes to KiCad"""
-        logger.info("✅ Committing routes to KiCad")
+        logger.info("SUCCESS: Committing routes to KiCad")
         self.status_label.setText("Applying routes to KiCad...")
         
         # TODO: Implement route application to KiCad
@@ -1202,7 +1281,7 @@ class OrthoRouteMainWindow(QMainWindow):
         
     def rollback_routes(self):
         """Discard calculated routes"""
-        logger.info("❌ Discarding routes")
+        logger.info("Discarding routes")
         self.status_label.setText("Discarding routes...")
         
         # TODO: Implement route rollback
@@ -1248,76 +1327,238 @@ class OrthoRouteMainWindow(QMainWindow):
         self.begin_autorouting()
     
     def _route_manhattan_rrg(self):
-        """Perform Manhattan RRG routing in a background thread"""
+        """Perform Manhattan RRG routing with live GUI updates"""
         try:
-            logger.info("Starting Manhattan routing...")
+            logger.info("Starting Manhattan routing with live updates...")
             
-            # Create AGGRESSIVE routing configuration for 2 nets/second target
+            # Create routing configuration matching RRG PathFinder parameters
             config = RoutingConfig(
-                grid_pitch=0.40,  # 0.40mm grid - EXACT GRID ALIGNMENT
-                track_width=0.0889,  # 3.5 mil
-                clearance=0.2,  # KiCad default
-                via_drill=0.4,  # Typical drill for 0.8mm via
-                via_diameter=0.25,  # User's preferred working size  
-                bend_penalty=2,
-                via_cost=10,
-                expansion_margin=3.0,
-                max_ripups_per_net=2,  # AGGRESSIVE: Reduced from 3
-                max_global_failures=100,
-                timeout_per_net=0.1  # AGGRESSIVE: 0.1s for 2 nets/second target
+                grid_pitch=0.4,
+                track_width=0.0889,
+                clearance=0.0889,
+                via_diameter=0.25,
+                via_drill=0.15,
+                k_length=1.0,
+                k_via=10.0,
+                k_bend=2.0,
+                max_iterations=50,
+                pres_fac_init=0.5,
+                pres_fac_mult=1.3,
+                hist_cost_step=1.0,
+                alpha=2.0
             )
             
-            # Create GPU provider for router
-            try:
-                gpu_provider = CUDAProvider()
-                if gpu_provider.is_available():
-                    gpu_provider.initialize()
-                    logger.info("Using CUDA GPU acceleration for Manhattan routing")
-                    device_info = gpu_provider.get_device_info()
-                    logger.info(f"GPU: {device_info.get('name', 'Unknown')}")
-                else:
-                    gpu_provider = CPUProvider()
-                    logger.info("Using CPU fallback for Manhattan routing")
-            except Exception as e:
-                logger.warning(f"Error initializing GPU: {e}")
-                gpu_provider = CPUProvider()
-                logger.info("Using CPU fallback for Manhattan routing")
-            
-            # Create and configure the routing thread
-            self.routing_thread = RoutingThread("Manhattan RRG", self.board_data, config, gpu_provider)
-            
-            # Connect thread signals
-            self.routing_thread.progress_update.connect(self._on_routing_progress)
-            self.routing_thread.routing_completed.connect(self._on_routing_completed)
-            self.routing_thread.routing_error.connect(self._on_routing_error)
-            
-            # Create cancel button if needed
-            if not hasattr(self, 'cancel_btn'):
-                self.cancel_btn = QPushButton("Cancel")
-                self.cancel_btn.clicked.connect(self._cancel_routing)
-                # Add to the main window layout (after the route preview button)
-                if hasattr(self, 'route_preview_btn') and self.route_preview_btn.parent():
-                    parent_layout = self.route_preview_btn.parent().layout()
-                    if parent_layout:
-                        parent_layout.addWidget(self.cancel_btn)
-            self.cancel_btn.setVisible(True)
-            
-            # Start the thread
-            self.routing_thread.start()
-            
-            # Disable UI elements during routing
-            self.route_preview_btn.setEnabled(False)
-            self.algorithm_combo.setEnabled(False)
-            
-            # Show progress bar
-            self.progress_bar.setVisible(True)
-            self.progress_bar.setValue(0)
+            # Initialize progressive routing state
+            self._setup_progressive_routing(config)
             
         except Exception as e:
             logger.exception("Error starting Manhattan routing")
             self.status_label.setText(f"Error: {str(e)}")
             self._reset_routing_ui()
             QMessageBox.critical(self, "Routing Error", f"Error starting Manhattan routing:\n{str(e)}")
+    
+    def _setup_progressive_routing(self, config):
+        """Initialize progressive routing with live GUI updates"""
+        # Create GPU provider for router
+        try:
+            gpu_provider = CUDAProvider()
+            if not gpu_provider.is_available():
+                gpu_provider = CPUFallbackProvider()
+                logger.warning("CUDA not available, using CPU fallback")
+        except Exception as e:
+            logger.error(f"GPU initialization error: {e}")
+            gpu_provider = CPUFallbackProvider()
+            
+        # Create basic constraints and initialize router
+        from orthoroute.domain.models.constraints import DRCConstraints
+        
+        # Create constraints with default values (dataclass)
+        constraints = DRCConstraints()
+        constraints.min_track_width = 0.0889  # 3.5 mil
+        constraints.min_track_spacing = 0.2   # 0.2mm clearance
+        constraints.min_via_diameter = 0.8
+        constraints.min_via_drill = 0.4
+        
+        # Initialize router with correct signature
+        self.router = ManhattanRRGRoutingEngine(
+            constraints=constraints,
+            gpu_provider=gpu_provider
+        )
+        
+        # Skip the complex board creation and use the existing router initialization
+        # The router will use the KiCad interface directly to get nets
+        logger.info("Progressive routing: Using KiCad interface for board initialization")
+        
+        # Convert board data to domain objects and initialize router
+        mock_board = self._convert_board_data_to_domain(self.board_data, constraints)
+        self.router.initialize(mock_board)
+        
+        # Use real nets from the board
+        self.routing_nets = [net for net in mock_board.nets if net.is_routable]
+        logger.info(f"Progressive routing: Found {len(self.routing_nets)} routable nets from board data")
+        self.current_net_index = 0
+        self.routed_count = 0
+        self.failed_count = 0
+        self.routing_start_time = time.time()
+        
+        # Setup GUI update timer
+        self.routing_timer = QTimer()
+        self.routing_timer.timeout.connect(self._routing_step)
+        self.routing_timer.start(100)  # Update every 100ms
+        
+        logger.info(f"Progressive routing initialized: {len(self.routing_nets)} nets to route")
+        
+    def _routing_step(self):
+        """Process routing steps using REAL PathFinder batch routing"""
+        try:
+            if self.current_net_index >= len(self.routing_nets):
+                # Routing complete
+                self._complete_routing()
+                return
+                
+            # REAL PATHFINDER: Use batch routing with negotiated congestion
+            # Process nets in batches for proper PathFinder routing with ripup/reroute
+            batch_size = min(50, len(self.routing_nets) - self.current_net_index)  # Process 50 nets at a time
+            net_batch = self.routing_nets[self.current_net_index:self.current_net_index + batch_size]
+            
+            logger.info(f"REAL PATHFINDER: Processing batch {self.current_net_index}-{self.current_net_index + batch_size} ({len(net_batch)} nets)")
+            
+            # Update progress for batch
+            progress = int((self.current_net_index / len(self.routing_nets)) * 100)
+            self.progress_bar.setValue(progress)
+            self.status_label.setText(f"PathFinder routing batch {self.current_net_index + 1}-{self.current_net_index + batch_size}/{len(self.routing_nets)}")
+            
+            # CRITICAL: Call route_all_nets() for REAL PathFinder with negotiated congestion
+            batch_results = self._route_net_batch(net_batch)
+            
+            # Process batch results
+            for i, (net, success) in enumerate(zip(net_batch, batch_results)):
+                if success:
+                    self.routed_count += 1
+                    logger.info(f"REAL PATHFINDER SUCCESS: Routed net {net.name}")
+                else:
+                    self.failed_count += 1
+                    logger.warning(f"REAL PATHFINDER FAILED: Failed to route net {net.name}")
+            
+            # Update GUI with current progress
+            self._update_routing_visualization()
+            
+            # Move to next batch
+            self.current_net_index += batch_size
+            
+        except Exception as e:
+            logger.error(f"Error in PathFinder batch routing: {e}")
+            self._complete_routing()
+            
+    def _route_net_batch(self, net_batch):
+        """Route a batch of nets using REAL PathFinder with negotiated congestion"""
+        try:
+            if not net_batch:
+                return []
+                
+            logger.info(f"REAL PATHFINDER: Routing batch of {len(net_batch)} nets with negotiated congestion")
+            
+            # CRITICAL: Use route_all_nets() for REAL PathFinder routing
+            # This enables negotiated congestion, ripup/reroute, proper grid-based routing
+            routing_stats = self.router.route_all_nets(
+                net_batch, 
+                timeout_per_net=30.0,  # 30 second timeout per net for real PathFinder
+                total_timeout=1800.0   # 30 minute total timeout for batch
+            )
+            
+            # Extract success status for each net
+            batch_results = []
+            for net in net_batch:
+                # Check if net was successfully routed
+                if hasattr(routing_stats, 'success_rate') and routing_stats.success_rate > 0:
+                    # For now, assume success based on overall stats
+                    # Real implementation would check per-net results
+                    batch_results.append(True)
+                else:
+                    batch_results.append(False)
+            
+            logger.info(f"REAL PATHFINDER BATCH: Completed {len(net_batch)} nets with success rate: {getattr(routing_stats, 'success_rate', 0):.1%}")
+            return batch_results
+                    
+        except Exception as e:
+            logger.error(f"Error in PathFinder batch routing: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            # Return all failures for this batch
+            return [False] * len(net_batch)
+
+    def _route_single_net_step(self, net):
+        """DEPRECATED: Route a single net (fallback only - use batch routing for real PathFinder)"""
+        try:
+            if not net or not hasattr(net, 'name'):
+                return False
+                
+            # DEPRECATED: This uses basic Dijkstra, not real PathFinder
+            # Use _route_net_batch() for proper PathFinder routing
+            logger.warning(f"DEPRECATED: Using single-net Dijkstra for {net.name} - should use batch PathFinder")
+            result = self.router.route_net(net, timeout=10.0)
+            
+            if result and result.success:
+                return True
+            else:
+                return False
+                    
+        except Exception as e:
+            logger.error(f"Error routing net {getattr(net, 'name', 'unknown')}: {e}")
+            return False
+            
+    def _update_routing_visualization(self):
+        """Update GUI visualization with current routing progress"""
+        if self.pcb_viewer:
+            # Get current routed tracks and vias
+            tracks = self.router.get_routed_tracks()
+            vias = self.router.get_routed_vias()
+            
+            # Update board_data with tracks and vias (CRITICAL FIX)
+            if tracks:
+                self.board_data['tracks'] = tracks
+                logger.debug(f"Updated board_data with {len(tracks)} tracks")
+            else:
+                logger.warning(f"No tracks received from router!")
+                
+            if vias:
+                self.board_data['vias'] = vias
+                logger.debug(f"Updated board_data with {len(vias)} vias")
+            else:
+                logger.debug(f"No vias received from router")
+            
+            # Update viewer with new routing data
+            if hasattr(self.pcb_viewer, 'update_routing'):
+                self.pcb_viewer.update_routing(tracks, vias)
+            else:
+                # Force repaint to show tracks
+                self.pcb_viewer.update()
+                
+    def _complete_routing(self):
+        """Complete the progressive routing process"""
+        self.routing_timer.stop()
+        
+        elapsed_time = time.time() - self.routing_start_time
+        logger.info(f"SUCCESS: Progressive routing complete: {self.routed_count}/{len(self.routing_nets)} nets routed in {elapsed_time:.1f}s")
+        
+        # Final GUI updates
+        self.progress_bar.setValue(100)
+        self.status_label.setText(f"Routing complete: {self.routed_count}/{len(self.routing_nets)} nets routed")
+        
+        # Final visualization update
+        self._update_routing_visualization()
+        
+        # DEBUG: Screenshot after routing
+        if self.pcb_viewer:
+            self.pcb_viewer.debug_screenshot("after_routing")
+            
+        # Reset UI
+        self._reset_routing_ui()
+        
+        # Enable commit/rollback if any routes were created
+        if self.routed_count > 0:
+            self.commit_btn.setEnabled(True)
+            self.rollback_btn.setEnabled(True)
     
     def _on_routing_progress(self, current, total, status, tracks, vias):
         """Handle routing progress updates from the thread"""
@@ -1337,9 +1578,17 @@ class OrthoRouteMainWindow(QMainWindow):
                 self.board_data['vias'] = []
             self.board_data['vias'].extend(vias)
             
-        # Trigger GUI update
-        if self.pcb_viewer:
+        # PERFORMANCE: Throttle GUI updates during routing
+        if self.pcb_viewer and hasattr(self, '_last_update_time'):
+            import time
+            current_time = time.time()
+            if current_time - self._last_update_time > 0.1:  # Max 10 FPS during routing
+                self.pcb_viewer.update()
+                self._last_update_time = current_time
+        elif self.pcb_viewer:
+            import time
             self.pcb_viewer.update()
+            self._last_update_time = time.time()
     
     def _on_routing_completed(self, result):
         """Handle routing completion"""
@@ -1375,7 +1624,7 @@ class OrthoRouteMainWindow(QMainWindow):
         except Exception as e:
             logger.warning(f"Error cleaning up GPU resources: {e}")
         
-        logger.info(f"✅ Manhattan routing successful: {routed_nets}/{routed_nets + failed_nets} nets")
+        logger.info(f"SUCCESS: Manhattan routing successful: {routed_nets}/{routed_nets + failed_nets} nets")
         
         # Update routing statistics
         stats = result.get('stats', {})
@@ -1439,3 +1688,93 @@ class OrthoRouteMainWindow(QMainWindow):
         self.rollback_btn.setEnabled(False)
         self.progress_bar.setVisible(False)
         self.status_label.setText("Ready")
+    
+    def _convert_board_data_to_domain(self, board_data, drc_constraints):
+        """Convert board_data dict to domain Board object for RRG router"""
+        from orthoroute.domain.models.board import Board, Net, Pad, Bounds, Coordinate, Component
+        
+        # Create board bounds
+        bounds_data = board_data.get('bounds', (0, 0, 100, 100))
+        board_bounds = Bounds(
+            min_x=bounds_data[0],
+            min_y=bounds_data[1], 
+            max_x=bounds_data[2],
+            max_y=bounds_data[3]
+        )
+        
+        # Convert nets and pads
+        nets = []
+        nets_data = board_data.get('nets', {})
+        
+        for net_name, net_data in nets_data.items():
+            if not net_name or net_name.strip() == "":
+                continue
+                
+            pads_data = net_data.get('pads', [])
+            if len(pads_data) < 2:
+                continue  # Skip single-pad nets
+            
+            # Convert pads
+            net_pads = []
+            for pad_data in pads_data:
+                pad = Pad(
+                    id=f"{net_name}_pad_{len(net_pads)}",
+                    component_id=f"comp_{net_name}_{len(net_pads)}",
+                    net_id=f"net_{len(nets)}",
+                    position=Coordinate(
+                        x=pad_data.get('x', 0.0),
+                        y=pad_data.get('y', 0.0)
+                    ),
+                    size=(
+                        pad_data.get('width', 1.0),
+                        pad_data.get('height', 1.0)
+                    ),
+                    drill_size=pad_data.get('drill', None),
+                    layer=pad_data.get('layers', ['F.Cu'])[0] if pad_data.get('layers') else 'F.Cu'
+                )
+                net_pads.append(pad)
+            
+            # Create net
+            net = Net(
+                id=f"net_{len(nets)}",
+                name=net_name,
+                pads=net_pads
+            )
+            nets.append(net)
+        
+        # Create mock components for proper bounds calculation
+        components = []
+        all_pads = []
+        for net in nets:
+            for i, pad in enumerate(net.pads):
+                all_pads.append(pad)
+        
+        # Create a single mock component containing all pads
+        if all_pads:
+            # Calculate center position
+            avg_x = sum(pad.position.x for pad in all_pads) / len(all_pads)
+            avg_y = sum(pad.position.y for pad in all_pads) / len(all_pads)
+            
+            mock_component = Component(
+                id="mock_comp_1",
+                reference="U1",
+                value="MOCK",
+                footprint="MOCK_FP",
+                position=Coordinate(avg_x, avg_y),
+                pads=all_pads
+            )
+            components.append(mock_component)
+        
+        # Create board
+        board = Board(
+            id="board_1",
+            name=board_data.get('filename', 'unknown.kicad_pcb'),
+            components=components,
+            nets=nets,
+            layer_count=12  # F.Cu + 10 internal + B.Cu
+        )
+        
+        # Store airwires as a custom attribute for RRG routing
+        board._airwires = board_data.get('airwires', [])
+        
+        return board

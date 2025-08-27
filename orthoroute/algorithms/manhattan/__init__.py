@@ -1,17 +1,13 @@
-"""Manhattan routing algorithm."""
-from .manhattan_router import ManhattanRoutingEngine
-from .layer_assignment import LayerDirectionManager
-from .astar import ManhattanAStarPathfinder
-
-# New modular Manhattan router components
-from .types import Pad, Via, Track, RouteResult, RoutingConfig
-from .grid_manager import GridManager
-from .pathfinder import ManhattanPathfinder
-from .escape_router import EscapeRouter
-from .board_utils import snapshot_board
+"""Manhattan routing algorithm - cleaned up architecture."""
+from .manhattan_router_rrg import ManhattanRRGRoutingEngine
+from .rrg import RoutingResourceGraph, PathFinderRouter, RoutingConfig, RouteRequest, RouteResult
+from .sparse_rrg_builder import SparseRRGBuilder
+from .wavefront_pathfinder import GPUWavefrontPathfinder
+from .types import Pad, Via, Track
 
 __all__ = [
-    'ManhattanRoutingEngine', 'LayerDirectionManager', 'ManhattanAStarPathfinder',
-    'Pad', 'Via', 'Track', 'RouteResult', 'RoutingConfig',
-    'GridManager', 'ManhattanPathfinder', 'EscapeRouter', 'snapshot_board'
+    'ManhattanRRGRoutingEngine', 
+    'RoutingResourceGraph', 'PathFinderRouter', 'RoutingConfig', 'RouteRequest', 'RouteResult',
+    'SparseRRGBuilder', 'GPUWavefrontPathfinder',
+    'Pad', 'Via', 'Track'
 ]

@@ -61,10 +61,10 @@ class RRGCache:
             cache_file = os.path.join(self.cache_dir, f"rrg_{cache_key}.pkl")
             
             if os.path.exists(cache_file):
-                logger.info(f"📦 Loading cached RRG fabric from {cache_file}")
+                logger.info(f"INFO: Loading cached RRG fabric from {cache_file}")
                 with open(cache_file, 'rb') as f:
                     rrg = pickle.load(f)
-                logger.info(f"✅ Loaded cached fabric: {len(rrg.nodes)} nodes, {len(rrg.edges)} edges")
+                logger.info(f"SUCCESS: Loaded cached fabric: {len(rrg.nodes)} nodes, {len(rrg.edges)} edges")
                 return rrg
             else:
                 logger.debug(f"No cached fabric found for key {cache_key}")
@@ -81,12 +81,12 @@ class RRGCache:
             cache_key = self._generate_cache_key(bounds, airwires, config_dict)
             cache_file = os.path.join(self.cache_dir, f"rrg_{cache_key}.pkl")
             
-            logger.info(f"💾 Caching RRG fabric to {cache_file}")
+            logger.info(f"INFO: Caching RRG fabric to {cache_file}")
             with open(cache_file, 'wb') as f:
                 pickle.dump(rrg, f)
             
             file_size_mb = os.path.getsize(cache_file) / (1024 * 1024)
-            logger.info(f"✅ Cached fabric: {file_size_mb:.1f}MB")
+            logger.info(f"SUCCESS: Cached fabric: {file_size_mb:.1f}MB")
             
         except Exception as e:
             logger.warning(f"Failed to cache fabric: {e}")
@@ -97,6 +97,6 @@ class RRGCache:
             for filename in os.listdir(self.cache_dir):
                 if filename.startswith("rrg_") and filename.endswith(".pkl"):
                     os.remove(os.path.join(self.cache_dir, filename))
-            logger.info("🗑️ Cleared RRG fabric cache")
+            logger.info("SUCCESS: Cleared RRG fabric cache")
         except Exception as e:
             logger.warning(f"Failed to clear cache: {e}")

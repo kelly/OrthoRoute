@@ -72,6 +72,43 @@ def run_plugin(show_gui: bool = False):
         sys.exit(1)
 
 
+def run_test_manhattan():
+    """Run automated Manhattan routing test without GUI."""
+    try:
+        config = setup_environment()
+        print("Starting automated Manhattan routing test...")
+        logging.info("Starting automated Manhattan routing test...")
+        
+        from orthoroute.presentation.plugin.kicad_plugin import KiCadPlugin
+        
+        plugin = KiCadPlugin()
+        
+        # Run with GUI for automated testing and auto-start routing
+        print("Loading board from KiCad and starting GUI...")
+        print("Auto-starting routing process...")
+        success = plugin.run_with_gui_autostart()
+        
+        if success:
+            logging.info("Manhattan routing test completed successfully")
+            print("TEST PASSED: Manhattan routing executed without errors")
+            sys.exit(0)
+        else:
+            logging.error("Manhattan routing test failed")
+            print("TEST FAILED: Manhattan routing encountered errors")
+            print("Note: Make sure KiCad is running with a board that has routable nets")
+            sys.exit(1)
+            
+    except Exception as e:
+        logging.error(f"Manhattan routing test failed with exception: {e}")
+        print(f"TEST FAILED: Exception occurred: {e}")
+        if "division by zero" in str(e):
+            print("Note: This typically occurs when the board has no routable nets")
+            print("Make sure KiCad is running with a board that has components with nets to route")
+        elif "No KiCad process" in str(e):
+            print("Note: KiCad must be running for the test to work")
+        sys.exit(1)
+
+
 def run_cli(board_file: str, output_dir: str = ".", config_path: Optional[str] = None):
     """Run command line interface."""
     try:
@@ -139,6 +176,7 @@ Examples:
   %(prog)s                              # Run KiCad plugin with GUI (default)
   %(prog)s plugin                       # Run as KiCad plugin with GUI  
   %(prog)s plugin --no-gui              # Run as KiCad plugin without GUI
+  %(prog)s --test-manhattan             # Run automated Manhattan routing test
   %(prog)s cli board.kicad_pcb          # Route board via CLI
   %(prog)s cli board.kicad_pcb -o out/  # Route and save to directory
         """
@@ -176,9 +214,19 @@ Examples:
         action='version',
         version='%(prog)s 1.0.0'
     )
+    parser.add_argument(
+        '--test-manhattan',
+        action='store_true',
+        help='Run automated Manhattan routing test without GUI'
+    )
     
     # Parse arguments
     args = parser.parse_args()
+    
+    # Check for test mode first (overrides other modes)
+    if getattr(args, 'test_manhattan', False):
+        run_test_manhattan()
+        return
     
     # Handle no arguments (default to plugin mode)
     if not args.mode:

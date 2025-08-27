@@ -91,7 +91,7 @@ class RoutingConfig:
     # PathFinder parameters
     max_iterations: int = 50       # Max congestion iterations
     pres_fac_init: float = 0.5     # Initial present factor
-    pres_fac_mult: float = 1.3     # Present factor multiplier
+    pres_fac_mult: float = 1.4     # Present factor multiplier (tightened for forced choke)
     hist_cost_step: float = 1.0    # History cost increment
     alpha: float = 2.0             # Congestion penalty exponent
 
@@ -120,7 +120,8 @@ class RoutingResourceGraph:
         self.config = config
         self.nodes: Dict[str, RRGNode] = {}
         self.edges: Dict[str, RRGEdge] = {}
-        self.adjacency: Dict[str, List[str]] = defaultdict(list)  # node_id -> edge_ids
+        # Memory-efficient adjacency using sets instead of lists (no duplicates)
+        self.adjacency: Dict[str, Set[str]] = defaultdict(set)  # node_id -> edge_ids
         
         # Layer configuration
         self.layer_count = 11  # In1.Cu through B.Cu
@@ -143,20 +144,24 @@ class RoutingResourceGraph:
         """Add node to RRG"""
         self.nodes[node.id] = node
         if node.id not in self.adjacency:
-            self.adjacency[node.id] = []
+            self.adjacency[node.id] = set()  # Initialize as set
     
     def add_edge(self, edge: RRGEdge) -> None:
         """Add edge to RRG"""
-        # Memory safety check - INCREASED limits for better routing
-        if len(self.edges) > 5000000:  # 5M edge limit (was 1M)
+        # Memory safety check - INCREASED limits for 16GB GPU ultra-dense routing
+        if len(self.edges) > 50000000:  # 50M edge limit for 16GB ultra-dense grids
             raise MemoryError(f"RRG edge limit exceeded: {len(self.edges)} edges. "
                             "Consider reducing board size or grid resolution.")
         
         self.edges[edge.id] = edge
         
-        # Add to adjacency lists
-        self.adjacency[edge.from_node].append(edge.id)
-        # Note: edges are directional, but we can traverse both ways in search
+        # Add to adjacency sets - CRITICAL FIX for bidirectional connectivity
+        # Using sets prevents duplicates and saves memory
+        self.adjacency[edge.from_node].add(edge.id)
+        
+        # FPGA-style routing requires bidirectional traversal 
+        # Add reverse adjacency so pathfinding can traverse both directions
+        self.adjacency[edge.to_node].add(edge.id)
         
     def get_neighbors(self, node_id: str) -> List[Tuple[str, str]]:
         """Get neighboring (node_id, edge_id) pairs"""
@@ -242,9 +247,18 @@ class PathFinderRouter:
         
         return result
     
+    def route_net(self, request: RouteRequest) -> RouteResult:
+        """Route net - alias for route_single_net for compatibility"""
+        return self.route_single_net(request)
+    
     def _route_with_escape_routing(self, request: RouteRequest, source_is_fcu: bool, sink_is_fcu: bool) -> RouteResult:
         """Route net with F.Cu escape routing"""
         logger.info(f"Routing net {request.net_id} with F.Cu escape routing")
+        
+        # CRITICAL: Ensure wavefront grid is built before creating escape vias
+        if not hasattr(self.wavefront_router, 'grid') or self.wavefront_router.grid is None:
+            logger.info("Pre-building wavefront grid for escape routing...")
+            self.wavefront_router.build_grid()
         
         # Get source and sink nodes
         source_node = self.rrg.nodes[request.source_pad]
@@ -310,10 +324,23 @@ class PathFinderRouter:
             
             logger.info(f"F.Cu escape routing SUCCESS: net {request.net_id}, path length {len(full_path)}")
             
+            # Find actual edge IDs for the full path (no more fake IDs)
+            full_path_edges = []
+            for i in range(len(full_path) - 1):
+                from_node = full_path[i]
+                to_node = full_path[i + 1]
+                # Find actual edge ID instead of creating fake one
+                actual_edge_id = self._find_edge_between_nodes(from_node, to_node)
+                if actual_edge_id:
+                    full_path_edges.append(actual_edge_id)
+                else:
+                    logger.debug(f"No edge found between {from_node} and {to_node} - skipping")
+            
             return RouteResult(
                 net_id=request.net_id,
                 success=True,
                 path=full_path,
+                edges=full_path_edges,
                 cost=result.cost + len(escape_segments) * 2,  # Add escape cost
                 length_mm=result.length_mm,
                 via_count=result.via_count + len(escape_segments)
@@ -327,59 +354,165 @@ class PathFinderRouter:
             return partial_result
     
     def _find_escape_point(self, fcu_node) -> Optional[str]:
-        """Create proper F.Cu escape routing with via placement"""
-        # Create escape via outside component footprint
-        escape_distance = 0.5  # 0.5mm escape distance from pad center
+        """Create FPGA-style escape routing to nearest grid intersection"""
+        # Find nearest grid intersection point for structured routing
+        nearest_intersection = self._find_nearest_grid_intersection(fcu_node.x, fcu_node.y)
         
-        # Try vertical directions only for F.Cu escape routing
+        if not nearest_intersection:
+            logger.error(f"No grid intersection found for F.Cu pad at ({fcu_node.x:.2f}, {fcu_node.y:.2f})")
+            return None
+            
+        via_x, via_y, layer = nearest_intersection
+        
+        # For FPGA-style routing, connect directly to grid intersection
+        # Keep short F.Cu stub (vertical breakout preferred)
         directions = [
-            (0, 1),   # Up (+Y) on F.Cu layer
-            (0, -1),  # Down (-Y) on F.Cu layer
+            (0, 1),   # Up (+Y) - preferred for top-side routing
+            (0, -1),  # Down (-Y) - backup direction
+            (1, 0),   # Right (+X) - secondary option  
+            (-1, 0),  # Left (-X) - secondary option
         ]
         
+        # Find best breakout direction toward grid intersection
+        best_direction = None
+        min_distance = float('inf')
+        
         for dx, dy in directions:
-            via_x = fcu_node.x + dx * escape_distance
-            via_y = fcu_node.y + dy * escape_distance
+            # Try 1mm breakout in this direction
+            stub_distance = 1.0  # Shorter stub for denser routing
+            test_x = fcu_node.x + dx * stub_distance  
+            test_y = fcu_node.y + dy * stub_distance
             
-            # Check if escape via position is clear
-            if self._is_escape_position_clear(via_x, via_y):
-                # Create escape via node 
-                via_id = f"escape_via_{fcu_node.id}_{dx}_{dy}"
-                escape_via = RRGNode(
-                    id=via_id,
-                    node_type=NodeType.SWITCH,  # Via acts as a switch point
-                    x=via_x,
-                    y=via_y,
-                    layer=0,  # Start on first routing layer
-                    capacity=1
-                )
-                self.rrg.add_node(escape_via)
+            # Calculate distance to grid intersection
+            distance = math.sqrt((test_x - via_x)**2 + (test_y - via_y)**2)
+            
+            if distance < min_distance:
+                min_distance = distance
+                best_direction = (dx, dy)
+        
+        if best_direction:
+            dx, dy = best_direction
+            stub_x = fcu_node.x + dx * 1.0  # 1mm F.Cu stub
+            stub_y = fcu_node.y + dy * 1.0
+            
+            # Create structured escape routing to grid intersection
+            if self._is_escape_position_clear(stub_x, stub_y):
+                # Create escape via at grid intersection
+                via_id = f"fabric_entry_{fcu_node.id}_{via_x:.1f}_{via_y:.1f}"
                 
-                # Create F.Cu trace segment from pad to via
-                fcu_trace_id = f"fcu_trace_{fcu_node.id}_to_{via_id}"
-                fcu_trace = RRGEdge(
-                    id=fcu_trace_id,
-                    edge_type=EdgeType.ENTRY,  # Use ENTRY for escape routing
-                    from_node=fcu_node.id,
-                    to_node=via_id,
-                    length_mm=escape_distance,
-                    base_cost=escape_distance * 1.0  # F.Cu trace cost
-                )
-                self.rrg.add_edge(fcu_trace)
+                # Use existing grid intersection or create switch point
+                intersection_node = self._get_or_create_grid_intersection(via_x, via_y, layer)
                 
-                # Connect escape via to nearby routing grid nodes
-                self._connect_via_to_routing_grid(via_id, via_x, via_y)
-                
-                # Store escape via for later addition to wavefront grid
-                if not hasattr(self, '_pending_escape_vias'):
-                    self._pending_escape_vias = []
-                self._pending_escape_vias.append((via_id, escape_via))
-                
-                logger.info(f"Created F.Cu escape via {via_id} at ({via_x:.2f},{via_y:.2f})")
-                return via_id
+                if intersection_node:
+                    # Create F.Cu breakout stub from pad to via 
+                    stub_distance = math.sqrt((stub_x - fcu_node.x)**2 + (stub_y - fcu_node.y)**2)
+                    fcu_trace_id = f"fcu_stub_{fcu_node.id}_to_grid"
+                    fcu_trace = RRGEdge(
+                        id=fcu_trace_id,
+                        edge_type=EdgeType.ENTRY,  # F.Cu breakout
+                        from_node=fcu_node.id,
+                        to_node=intersection_node.id,
+                        length_mm=stub_distance + min_distance,  # Total routing distance
+                        base_cost=(stub_distance + min_distance) * 1.5  # Higher cost for F.Cu + via
+                    )
+                    self.rrg.add_edge(fcu_trace)
+                    
+                    logger.info(f"Connected F.Cu pad {fcu_node.id} to grid at ({via_x:.1f},{via_y:.1f}) via {stub_distance:.1f}mm stub")
+                    return intersection_node.id
                 
         logger.warning(f"Could not find clear escape position for F.Cu node {fcu_node.id}")
         return None
+    
+    def _find_nearest_grid_intersection(self, x: float, y: float) -> Optional[Tuple[float, float, int]]:
+        """Find nearest grid intersection point for FPGA-style routing"""
+        # Use 0.2mm grid pitch from config for dense backplane
+        grid_pitch = 0.2  # Match dense pad spacing
+        
+        # Find nearest grid intersection coordinates
+        grid_x = round(x / grid_pitch) * grid_pitch
+        grid_y = round(y / grid_pitch) * grid_pitch
+        
+        # Use first internal routing layer (layer 0 = In1.Cu)
+        target_layer = 0
+        
+        logger.debug(f"Mapped F.Cu pad at ({x:.2f},{y:.2f}) to grid intersection ({grid_x:.2f},{grid_y:.2f}) on layer {target_layer}")
+        return (grid_x, grid_y, target_layer)
+    
+    def _get_or_create_grid_intersection(self, x: float, y: float, layer: int) -> Optional[RRGNode]:
+        """Get existing grid intersection or create switch point with multi-layer via support"""
+        # Support blind/buried vias at same coordinates - include layer in ID
+        # This allows multiple via types at same (x,y): F.Cu->In1.Cu, In5.Cu->B.Cu, etc.
+        switch_id = f"grid_switch_L{layer}_{x:.1f}_{y:.1f}"
+        
+        if switch_id in self.rrg.nodes:
+            return self.rrg.nodes[switch_id]
+        
+        # Look for nearby routing nodes (rails/buses) to connect to
+        # CRITICAL FIX: Search in adjacent grid cells to avoid self-connection
+        nearby_nodes = []
+        search_radius = self.config.grid_pitch * 1.5  # Search in adjacent cells
+        
+        for node_id, node in self.rrg.nodes.items():
+            if node.layer == layer and node.node_type in [NodeType.RAIL, NodeType.BUS]:
+                distance = math.sqrt((node.x - x)**2 + (node.y - y)**2)
+                # CRITICAL: Avoid connecting to nodes at exactly same position (self-loops)
+                if self.config.grid_pitch * 0.1 < distance <= search_radius:
+                    nearby_nodes.append((node_id, node, distance))
+        
+        if not nearby_nodes:
+            logger.warning(f"No routing nodes found near grid intersection ({x:.1f},{y:.1f}) layer {layer}")
+            return None
+        
+        # Find closest routing node (but not at same position)
+        nearest_node_id, nearest_node, _ = min(nearby_nodes, key=lambda n: n[2])
+        
+        # Create switch point at grid intersection
+        switch_node = RRGNode(
+            id=switch_id,
+            node_type=NodeType.SWITCH,
+            x=x,
+            y=y,
+            layer=layer,
+            capacity=1
+        )
+        self.rrg.add_node(switch_node)
+        
+        # Connect switch to nearest routing node
+        conn_id = f"switch_conn_{switch_id}_to_{nearest_node_id}"
+        switch_edge = RRGEdge(
+            id=conn_id,
+            edge_type=EdgeType.SWITCH,
+            from_node=switch_id,
+            to_node=nearest_node_id,
+            length_mm=math.sqrt((switch_node.x - nearest_node.x)**2 + (switch_node.y - nearest_node.y)**2),
+            base_cost=self.config.k_via  # Via cost for grid entry
+        )
+        self.rrg.add_edge(switch_edge)
+        
+        # Also create reverse edge for bidirectional connectivity
+        reverse_conn_id = f"switch_conn_{nearest_node_id}_to_{switch_id}"
+        reverse_switch_edge = RRGEdge(
+            id=reverse_conn_id,
+            edge_type=EdgeType.SWITCH,
+            from_node=nearest_node_id,
+            to_node=switch_id,
+            length_mm=math.sqrt((switch_node.x - nearest_node.x)**2 + (switch_node.y - nearest_node.y)**2),
+            base_cost=self.config.k_via  # Via cost for grid entry
+        )
+        self.rrg.add_edge(reverse_switch_edge)
+        
+        # CRITICAL: Add the new switch node to the wavefront grid dynamically
+        if hasattr(self.wavefront_router, 'add_node_to_grid'):
+            grid_pos = self.wavefront_router.add_node_to_grid(switch_id, switch_node)
+            if grid_pos:
+                logger.info(f"Added grid intersection switch {switch_id} to wavefront grid at {grid_pos}")
+            else:
+                logger.error(f"Failed to add switch {switch_id} to wavefront grid")
+        else:
+            logger.warning("Wavefront router does not support dynamic node addition")
+        
+        logger.info(f"Created grid intersection switch {switch_id} connected to {nearest_node_id}")
+        return switch_node
     
     def _create_partial_escape_route_result(self, request: RouteRequest, source_is_fcu: bool, sink_is_fcu: bool, escape_segments: List, escape_vias: List = None) -> RouteResult:
         """Create route result showing escape routing even when internal routing fails"""
@@ -411,10 +544,23 @@ class PathFinderRouter:
         
         logger.info(f"Created partial escape route for {request.net_id}: {len(partial_path)} segments")
         
+        # Find actual edge IDs for the path segments (no fake IDs)
+        path_edges = []
+        for i in range(len(partial_path) - 1):
+            from_node = partial_path[i]
+            to_node = partial_path[i + 1]
+            # Find actual edge ID instead of creating fake one
+            actual_edge_id = self._find_edge_between_nodes(from_node, to_node)
+            if actual_edge_id:
+                path_edges.append(actual_edge_id)
+            else:
+                logger.debug(f"No edge found between {from_node} and {to_node} for partial path")
+        
         return RouteResult(
             net_id=request.net_id,
-            success=True,  # Mark as success so escape routing gets visualized
+            success=False,  # Mark as FAILED - only complete routes should succeed
             path=partial_path,
+            edges=path_edges,
             cost=len(escape_segments) * 2.0,
             length_mm=len(escape_segments) * 0.5,  # Escape distance
             via_count=len(escape_segments)
@@ -535,18 +681,31 @@ class PathFinderRouter:
     
     def claim_route(self, result: RouteResult):
         """Claim resources for a successful route"""
+        # Handle edges with safety check
+        missing_edges = []
         for edge_id in result.edges:
-            edge = self.rrg.edges[edge_id]
-            edge.usage += 1
+            if edge_id in self.rrg.edges:
+                edge = self.rrg.edges[edge_id]
+                edge.usage += 1
+            else:
+                missing_edges.append(edge_id)
+        
+        if missing_edges:
+            logger.warning(f"Route claiming: {len(missing_edges)} missing edges out of {len(result.edges)} total")
+            logger.debug(f"Missing edge IDs: {missing_edges[:3]}...")
             
+        # Handle nodes
         for node_id in result.path:
-            node = self.rrg.nodes[node_id]
-            if node.node_type in [NodeType.RAIL, NodeType.BUS]:
-                node.usage += 1
+            if node_id in self.rrg.nodes:
+                node = self.rrg.nodes[node_id]
+                if node.node_type in [NodeType.RAIL, NodeType.BUS]:
+                    node.usage += 1
+            else:
+                logger.debug(f"Missing node in claim_route: {node_id}")
     
     def route_all_nets(self, requests: List[RouteRequest]) -> Dict[str, RouteResult]:
         """Route all nets with negotiated congestion"""
-        logger.info(f"🚀 Starting PathFinder routing for {len(requests)} nets")
+        logger.info(f"Starting PathFinder routing for {len(requests)} nets")
         
         results = {}
         
@@ -572,11 +731,11 @@ class PathFinderRouter:
             overused_edges = self.rrg.get_overused_edges()
             
             if not overused_edges:
-                logger.info(f"✅ Routing converged after {iteration + 1} iterations")
+                logger.info(f"Routing converged after {iteration + 1} iterations")
                 break
                 
             if failed_nets == len(requests):
-                logger.warning(f"❌ All nets failed in iteration {iteration + 1}")
+                logger.warning(f"All nets failed in iteration {iteration + 1}")
                 break
             
             # Update costs for next iteration
@@ -598,6 +757,6 @@ class PathFinderRouter:
                         f"{failed_nets} failed nets")
         
         success_count = sum(1 for r in results.values() if r.success)
-        logger.info(f"🏁 PathFinder complete: {success_count}/{len(requests)} nets routed")
+        logger.info(f"PathFinder complete: {success_count}/{len(requests)} nets routed")
         
         return results

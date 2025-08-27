@@ -86,7 +86,7 @@ class KiCadPlugin:
         from ...infrastructure.persistence.memory_board_repository import MemoryBoardRepository
         from ...infrastructure.persistence.memory_routing_repository import MemoryRoutingRepository
         from ...infrastructure.persistence.event_bus import EventBus
-        from ...algorithms.manhattan.manhattan_router import ManhattanRoutingEngine
+        from ...algorithms.manhattan.manhattan_router_rrg import ManhattanRRGRoutingEngine
         from ...domain.models.constraints import DRCConstraints
         
         # Initialize repositories and services
@@ -98,7 +98,7 @@ class KiCadPlugin:
         default_constraints = DRCConstraints()
         
         # Initialize routing engine
-        self.routing_engine = ManhattanRoutingEngine(
+        self.routing_engine = ManhattanRRGRoutingEngine(
             constraints=default_constraints,
             gpu_provider=self.gpu_provider
         )
@@ -318,6 +318,103 @@ class KiCadPlugin:
                 window.show()
                 
                 logger.info("OrthoRoute rich GUI launched successfully!")
+                
+                # Run the application
+                result = app.exec()
+                return result == 0
+                
+            except Exception as e:
+                logger.error(f"Failed to connect to KiCad or get board data: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                QMessageBox.critical(None, "KiCad Error", 
+                                   f"Failed to connect to KiCad or get board data:\n{e}\n\n"
+                                   f"Make sure:\n"
+                                   f"• KiCad is running\n"
+                                   f"• A PCB file is open\n"
+                                   f"• IPC API is enabled in KiCad preferences")
+                return False
+            
+        except Exception as e:
+            logger.error(f"GUI execution failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            # Fall back to headless mode
+            return self.run()
+    
+    def run_with_gui_autostart(self):
+        """Run plugin with GUI and automatically start routing process."""
+        try:
+            logger.info("Loading board from KiCad using rich interface for GUI with autostart")
+            
+            from PyQt6.QtWidgets import QApplication, QMessageBox
+            from PyQt6.QtCore import QTimer
+            import sys
+            
+            # Create Qt application
+            app = QApplication.instance()
+            if app is None:
+                app = QApplication(sys.argv)
+                app.setApplicationName("OrthoRoute")
+                app.setApplicationVersion("1.0.0")
+                app.setOrganizationName("OrthoRoute")
+            
+            # Connect to KiCad and get board data using the rich interface
+            logger.info("Connecting to KiCad to get rich board data...")
+            
+            try:
+                from ...infrastructure.kicad.rich_kicad_interface import RichKiCadInterface
+                kicad_interface = RichKiCadInterface()
+                
+                # Connect to running KiCad instance
+                if not kicad_interface.connect():
+                    QMessageBox.critical(None, "KiCad Connection Error", 
+                                       "Could not connect to KiCad via IPC API.\n\n"
+                                       "Make sure KiCad is running and has a PCB file open,\n"
+                                       "and that the IPC API is enabled in KiCad preferences.")
+                    logger.error("Failed to connect to KiCad")
+                    return False
+                
+                logger.info("Connected to KiCad via rich IPC API")
+                
+                # Get rich board data from the currently open PCB
+                board_data = kicad_interface.get_board_data()
+                
+                if not board_data or len(board_data.get('pads', [])) == 0:
+                    QMessageBox.critical(None, "No Board Data", 
+                                       "No valid board data found.\n\n"
+                                       "Make sure you have a PCB file open in KiCad\n"
+                                       "with components and pads.")
+                    logger.error("No valid board data found")
+                    return False
+                
+                logger.info(f"Loaded rich board data from KiCad: {len(board_data.get('pads', []))} pads, {len(board_data.get('nets', {}))} nets")
+                
+                # Create and show the full-featured OrthoRoute window
+                from ..gui.main_window import OrthoRouteMainWindow
+                window = OrthoRouteMainWindow(board_data, kicad_interface)
+                window.show()
+                
+                logger.info("OrthoRoute rich GUI launched successfully!")
+                
+                # Auto-start routing after 2 seconds to let GUI load
+                def auto_start_routing():
+                    logger.info("AUTO-START: Triggering routing process...")
+                    if hasattr(window, 'begin_autorouting'):
+                        window.begin_autorouting()
+                        logger.info("AUTO-START: Successfully triggered begin_autorouting")
+                    else:
+                        logger.warning("AUTO-START: begin_autorouting method not found")
+                        # Fallback to route_all_nets if available
+                        if hasattr(window, 'route_all_nets'):
+                            window.route_all_nets()
+                        else:
+                            logger.warning("AUTO-START: No routing method found")
+                
+                timer = QTimer()
+                timer.timeout.connect(auto_start_routing)
+                timer.setSingleShot(True)
+                timer.start(2000)  # Start routing after 2 seconds
                 
                 # Run the application
                 result = app.exec()

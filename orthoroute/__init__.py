@@ -21,7 +21,7 @@ from .shared.configuration.settings import ApplicationSettings
 from .presentation.plugin.kicad_plugin import KiCadPlugin
 
 # Algorithm exports
-from .algorithms.manhattan.manhattan_router import ManhattanRoutingEngine
+from .algorithms.manhattan.manhattan_router_rrg import ManhattanRRGRoutingEngine
 
 # Infrastructure exports
 from .infrastructure.kicad.ipc_adapter import KiCadIPCAdapter
@@ -47,7 +47,7 @@ __all__ = [
     "KiCadPlugin",
     
     # Algorithms
-    "ManhattanRoutingEngine",
+    "ManhattanRRGRoutingEngine",
     
     # Infrastructure
     "KiCadIPCAdapter", "CUDAProvider", "CPUProvider"

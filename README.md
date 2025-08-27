@@ -49,7 +49,6 @@ OrthoRoute is built using **hexagonal architecture** (ports & adapters) with **d
 
 ### 🔌 **KiCad Integration**
 - **IPC API**: Real-time board data synchronization
-- **File Parser**: Direct .kicad_pcb file parsing when APIs unavailable
 - **Native Plugin**: Seamless integration into KiCad workflow
 
 ### 🎨 **Professional GUI**
@@ -92,7 +91,7 @@ Traditional autorouters can take hours or days on large boards. OrthoRoute uses 
 ## 🚀 Quick Start
 
 ### Prerequisites
-- **KiCad 8.0+** with IPC API support
+- **KiCad 9.0.1+** with IPC API support
 - **Python 3.8+** 
 - **GPU (Optional)**: CUDA-compatible GPU for acceleration
 
