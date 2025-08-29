@@ -43,6 +43,30 @@ class GPUPathFinderRouter:
         }
         
         logger.info(f"GPU PathFinder router initialized (GPU: {self.use_gpu})")
+        
+        # Check for CSR adjacency matrix support and initialize advanced components
+        if self.use_gpu and hasattr(gpu_rrg, 'adjacency_csr'):
+            logger.info("Using optimized GPU CSR pathfinding with parallel PathFinder")
+            self.use_csr_pathfinding = True
+            
+            # Initialize true parallel PathFinder
+            from .parallel_pathfinder import TrueParallelPathFinder
+            self.parallel_pathfinder = TrueParallelPathFinder(gpu_rrg)
+            
+            # Initialize F.Cu tap builder  
+            from .fcu_tap_builder import FCuVerticalTapBuilder
+            fabric_bounds = self._get_fabric_bounds()
+            self.fcu_tap_builder = FCuVerticalTapBuilder(fabric_bounds)
+            
+            # Initialize blind via manager
+            from .blind_via_manager import BlindViaManager
+            layer_count = gpu_rrg.cpu_rrg.layer_count if hasattr(gpu_rrg, 'cpu_rrg') else 11
+            self.blind_via_manager = BlindViaManager(layer_count)
+            
+            logger.info("Advanced routing components initialized: parallel PathFinder + F.Cu taps + blind vias")
+        else:
+            logger.info("Using fallback pathfinding implementation") 
+            self.use_csr_pathfinding = False
     
     def route_all_nets(self, requests: List[RouteRequest]) -> Dict[str, RouteResult]:
         """Route all nets using PathFinder negotiated congestion"""
@@ -197,8 +221,16 @@ class GPUPathFinderRouter:
                         f"source={request.source_pad}, sink={request.sink_pad}")
             return RouteResult(net_id=request.net_id, success=False)
         
-        # Run pathfinding algorithm
-        path_nodes, path_edges = self._dijkstra_pathfinding(source_idx, sink_idx)
+        # Get pathfinding state
+        state = self.gpu_rrg.pathfinder_state
+        
+        # Run pathfinding algorithm - choose implementation based on availability
+        if self.use_csr_pathfinding:
+            from .gpu_csr_pathfinder import GPUCSRPathFinder
+            csr_pathfinder = GPUCSRPathFinder(self.gpu_rrg)
+            path_nodes, path_edges = csr_pathfinder.route_single_net_csr(source_idx, sink_idx, state)
+        else:
+            path_nodes, path_edges = self._dijkstra_pathfinding(source_idx, sink_idx)
         
         if not path_nodes:
             return RouteResult(net_id=request.net_id, success=False)
@@ -223,7 +255,7 @@ class GPUPathFinderRouter:
         )
     
     def _dijkstra_pathfinding(self, source_idx: int, sink_idx: int) -> Tuple[List[int], List[int]]:
-        """GPU-accelerated Dijkstra pathfinding with RRG fabric awareness"""
+        """Pure GPU wavefront pathfinding using sparse CSR adjacency structure"""
         
         state = self.gpu_rrg.pathfinder_state
         
@@ -640,6 +672,134 @@ class GPUPathFinderRouter:
         }
         
         logger.info("GPU PathFinder routing state cleared")
+    
+    def _get_fabric_bounds(self) -> Tuple[float, float, float, float]:
+        """Get fabric bounding box for tap builder"""
+        # Extract bounds from GPU RRG 
+        if hasattr(self.gpu_rrg, 'cpu_rrg') and hasattr(self.gpu_rrg.cpu_rrg, 'bounds'):
+            bounds = self.gpu_rrg.cpu_rrg.bounds
+            return (bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y)
+        else:
+            # Fallback to reasonable defaults
+            return (-50.0, -50.0, 250.0, 250.0)
+    
+    def route_all_nets_parallel(self, requests: List[RouteRequest]) -> Dict[str, RouteResult]:
+        """Route all nets using TRUE parallel PathFinder algorithm"""
+        
+        if not self.use_csr_pathfinding or not hasattr(self, 'parallel_pathfinder'):
+            logger.warning("Parallel PathFinder not available, falling back to sequential routing")
+            return self.route_all_nets(requests)
+        
+        logger.info(f"Starting TRUE PARALLEL PathFinder routing for {len(requests)} nets")
+        start_time = time.time()
+        
+        # Convert route requests to parallel format
+        from .parallel_pathfinder import ParallelRouteRequest
+        parallel_requests = []
+        
+        for req in requests:
+            # Get source and sink indices (with F.Cu tap integration)
+            source_idx, sink_idx = self._get_routing_endpoints_with_taps(req)
+            if source_idx is not None and sink_idx is not None:
+                parallel_req = ParallelRouteRequest(
+                    net_id=req.net_id,
+                    source_idx=source_idx,
+                    sink_idx=sink_idx,
+                    priority=1.0  # Could be adjusted based on net criticality
+                )
+                parallel_requests.append(parallel_req)
+        
+        # Execute parallel PathFinder
+        paths = self.parallel_pathfinder.route_all_nets_parallel(parallel_requests)
+        
+        # Convert back to RouteResult format
+        results = {}
+        for req in requests:
+            path = paths.get(req.net_id, [])
+            if path:
+                # Convert path to RouteResult
+                result = self._create_route_result_from_path(req, path)
+                results[req.net_id] = result
+            else:
+                results[req.net_id] = RouteResult(net_id=req.net_id, success=False)
+        
+        total_time = time.time() - start_time
+        successful_routes = len([r for r in results.values() if r.success])
+        
+        logger.info(f"Parallel PathFinder completed: {successful_routes}/{len(requests)} routes in {total_time:.2f}s")
+        
+        # Update statistics
+        self.routing_stats['total_nets_routed'] += len(requests)
+        self.routing_stats['successful_routes'] += successful_routes
+        self.routing_stats['total_routing_time'] += total_time
+        
+        return results
+    
+    def _get_routing_endpoints_with_taps(self, request: RouteRequest) -> Tuple[Optional[int], Optional[int]]:
+        """Get routing endpoints with F.Cu tap integration"""
+        
+        # Extract base net name (remove pin suffix like _1)
+        # Net IDs like "B07B15_000_1" -> base name "B07B15_000"  
+        base_net_id = request.net_id
+        if base_net_id.endswith('_1') or base_net_id.endswith('_2'):
+            base_net_id = base_net_id.rsplit('_', 1)[0]
+        
+        # Use tap node indices instead of pad-based lookup
+        # Tap IDs follow the pattern: tap_{base_net_name}_{tap_index}
+        source_tap_id = f"tap_{base_net_id}_0"  # First tap for source
+        sink_tap_id = f"tap_{base_net_id}_1"    # Second tap for sink
+        
+        logger.info(f"Looking for tap nodes: {source_tap_id}, {sink_tap_id}")
+        logger.info(f"Available tap nodes: {sorted(list(self.gpu_rrg.tap_nodes.keys())[:20])}...")  # Show first 20 sorted
+        
+        # Look up tap node indices from the tap mapping
+        source_idx = self.gpu_rrg.tap_nodes.get(source_tap_id)
+        sink_idx = self.gpu_rrg.tap_nodes.get(sink_tap_id)
+        
+        logger.info(f"TAP LOOKUP: {source_tap_id} -> {source_idx}, {sink_tap_id} -> {sink_idx}")
+        
+        # Fallback to node_id lookup if tap nodes not found
+        if source_idx is None:
+            source_idx = self.gpu_rrg.get_node_idx(source_tap_id)
+        if sink_idx is None:
+            sink_idx = self.gpu_rrg.get_node_idx(sink_tap_id)
+        
+        # Debug logging
+        if source_idx is None or sink_idx is None:
+            logger.warning(f"Could not find tap nodes for {request.net_id}: source={source_tap_id}({source_idx}), sink={sink_tap_id}({sink_idx})")
+            available_taps = [k for k in self.gpu_rrg.tap_nodes.keys() if request.net_id in k]
+            logger.warning(f"Available taps for {request.net_id}: {available_taps[:5]}...")  # Show first 5
+        
+        return source_idx, sink_idx
+    
+    def _create_route_result_from_path(self, request: RouteRequest, path: List[int]) -> RouteResult:
+        """Create RouteResult from node path"""
+        
+        if not path:
+            return RouteResult(net_id=request.net_id, success=False)
+        
+        # Convert node indices to IDs
+        node_ids = []
+        for node_idx in path:
+            if hasattr(self.gpu_rrg, 'get_node_id'):
+                node_id = self.gpu_rrg.get_node_id(node_idx)
+                if node_id:
+                    node_ids.append(node_id)
+        
+        # Calculate basic metrics
+        cost = len(path) * 1.0  # Simple cost estimate
+        length_mm = len(path) * 0.4  # Assume 0.4mm per step
+        via_count = 0  # Would need layer analysis
+        
+        return RouteResult(
+            net_id=request.net_id,
+            success=True,
+            path=node_ids,
+            edges=[],  # Could be populated from path
+            cost=cost,
+            length_mm=length_mm,
+            via_count=via_count
+        )
     
     def get_routing_statistics(self) -> Dict:
         """Get routing performance statistics"""

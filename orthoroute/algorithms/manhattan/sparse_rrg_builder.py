@@ -357,12 +357,38 @@ class SparseRRGBuilder:
             local_cols = int(math.ceil(width / self.fine_pitch))
             local_rows = int(math.ceil(height / self.fine_pitch))
             
-            # RTX 5090 MODE: No memory limits - use full resolution
-            grid_cells = local_cols * local_rows
-            estimated_memory_gb = (grid_cells * self.rrg.layer_count * 50) / (1024**3)  # 50 bytes per cell estimate
-            logger.info(f"ULTRA-DENSE: {local_cols}×{local_rows}×{self.rrg.layer_count} = {grid_cells * self.rrg.layer_count:,} cells (~{estimated_memory_gb:.1f}GB)")
+            # SIMPLE FABRIC MODE: Calculate directly from board dimensions + margin
+            # Add 3mm margin on each side as requested
+            fabric_width = width + 6.0   # +3mm each side
+            fabric_height = height + 6.0  # +3mm each side
             
-            logger.debug(f"Local area {area_idx}: {local_cols}×{local_rows} @ {self.fine_pitch}mm")
+            # Use 0.4mm pitch for the fabric as requested
+            fabric_pitch = 0.4  # mm
+            
+            # Calculate grid dimensions
+            local_cols = int(math.ceil(fabric_width / fabric_pitch))
+            local_rows = int(math.ceil(fabric_height / fabric_pitch))
+            
+            grid_cells = local_cols * local_rows
+            total_nodes = grid_cells * self.rrg.layer_count
+            estimated_memory_gb = (total_nodes * 50) / (1024**3)  # 50 bytes per cell estimate
+            
+            logger.info(f"SIMPLE FABRIC: {local_cols}×{local_rows}×{self.rrg.layer_count} = {total_nodes:,} nodes (~{estimated_memory_gb:.1f}GB)")
+            logger.info(f"Board area: {width:.1f}×{height:.1f}mm + 3mm margin = {fabric_width:.1f}×{fabric_height:.1f}mm")
+            logger.info(f"Using fabric pitch: {fabric_pitch}mm")
+            logger.info("Taps will be added on-demand during routing to connect pads to fabric")
+            
+            # Reasonable safety check for 16GB GPU (allow up to ~5M nodes)
+            max_reasonable_nodes = 5000000
+            if total_nodes > max_reasonable_nodes:
+                logger.error(f"SAFETY: Fabric has {total_nodes:,} nodes > {max_reasonable_nodes:,} limit!")
+                logger.error(f"Board is too large for current GPU memory limits")
+                raise RuntimeError(f"Fabric too large: {total_nodes:,} nodes exceeds reasonable limit for GPU routing")
+            
+            logger.debug(f"Local area {area_idx}: {local_cols}×{local_rows} @ {fabric_pitch}mm (simple fabric)")
+            
+            # Store the actual pitch used for this area
+            actual_pitch = fabric_pitch
             
             # Build local rails and buses
             for layer_idx in range(self.rrg.layer_count):
@@ -370,10 +396,10 @@ class SparseRRGBuilder:
                 
                 if direction == 'H':
                     for row in range(local_rows):
-                        y_pos = min_y + (row + 0.5) * (height / local_rows)
+                        y_pos = min_y + (row + 0.5) * actual_pitch
                         
                         for col in range(local_cols - 1):
-                            x_center = min_x + (col + 0.5) * (width / local_cols)
+                            x_center = min_x + (col + 0.5) * actual_pitch
                             
                             bus_id = f"local_{area_idx}_bus_L{layer_idx}_R{row}_C{col}"
                             bus_node = RRGNode(
@@ -402,14 +428,14 @@ class SparseRRGBuilder:
                 
                 elif direction == 'V':
                     for col in range(local_cols):
-                        x_pos = min_x + (col + 0.5) * (width / local_cols)
+                        x_pos = min_x + (col + 0.5) * actual_pitch
                         
                         # Store grid X positions for tap generation
                         if x_pos not in self.grid_x_positions:
                             self.grid_x_positions.append(x_pos)
                         
                         for row in range(local_rows - 1):
-                            y_center = min_y + (row + 0.5) * (height / local_rows)
+                            y_center = min_y + (row + 0.5) * actual_pitch
                             
                             rail_id = f"local_{area_idx}_rail_L{layer_idx}_C{col}_R{row}"
                             rail_node = RRGNode(
@@ -694,10 +720,17 @@ class SparseRRGBuilder:
         edge_memory_bytes = total_edges * 300   # ~300 bytes per edge
         total_memory_mb = (node_memory_bytes + edge_memory_bytes) / (1024 * 1024)  # Convert bytes to MB
         
-        logger.info(f"Sparse RRG built: {total_nodes} nodes, {total_edges} edges")
+        logger.info(f"Constrained Sparse RRG built: {total_nodes:,} nodes, {total_edges:,} edges")
         logger.info(f"   Global grid: {self.coarse_cols}×{self.coarse_rows} @ {self.coarse_pitch}mm")
-        logger.info(f"   Local areas: {len(self.local_areas)} @ {self.fine_pitch}mm")
+        logger.info(f"   Local areas: {len(self.local_areas)} (using constrained fabric)")
         logger.info(f"   Estimated memory: {total_memory_mb:.1f}MB")
+        logger.info(f"   Average connectivity: {total_edges/total_nodes:.1f} edges per node (ideal for sparse CSR)")
+        
+        # Calculate theoretical dense matrix memory for comparison
+        dense_memory_gb = (total_nodes * total_nodes * 4) / (1024**3)  # float32
+        sparse_memory_mb = (total_edges * 12) / (1024**2)  # CSR: data + indices + indptr
+        logger.info(f"   Dense matrix would require: {dense_memory_gb:.1f}GB")
+        logger.info(f"   Sparse CSR requires: {sparse_memory_mb:.1f}MB ({dense_memory_gb*1024/sparse_memory_mb:.0f}x smaller)")
         
         if total_memory_mb > 1000:  # Warn if approaching 1GB
             logger.warning(f"Memory usage high: {total_memory_mb:.1f}MB")

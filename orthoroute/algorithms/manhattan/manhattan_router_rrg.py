@@ -981,7 +981,7 @@ class ManhattanRRGRoutingEngine(RoutingEngine):
             # Route using GPU-accelerated PathFinder if available
             if self.use_gpu_rrg and self.gpu_pathfinder:
                 logger.debug(f"GPU PathFinder routing net {net.name}")
-                results = self.gpu_pathfinder.route_all_nets(requests)
+                results = self.gpu_pathfinder.route_all_nets_parallel(requests)
             elif self.pathfinder_router:
                 logger.debug(f"Legacy PathFinder routing net {net.name}")
                 results = self.pathfinder_router.route_all_nets(requests)
@@ -1258,27 +1258,28 @@ class ManhattanRRGRoutingEngine(RoutingEngine):
         
         logger.info(f"Starting RRG PathFinder routing for {len(nets)} nets")
         
-        # RTX 5090 can handle much larger workloads - scale appropriately
-        if len(nets) > 5000:
-            test_nets = nets[:50]  # 50 nets for massive boards (RTX 5090 can handle this)
-            logger.info(f"RTX 5090 SCALING: Board has {len(nets)} nets - processing {len(test_nets)} nets")
-        elif len(nets) > 1000:
-            test_nets = nets[:100]  # 100 nets for large boards
-            logger.info(f"LARGE BOARD: Processing {len(test_nets)} of {len(nets)} nets")
-        else:
-            test_nets = nets[:min(len(nets), 200)]  # Process up to 200 nets for smaller boards
-            logger.info(f"Processing {len(test_nets)} of {len(nets)} nets")
+        # TRUE PARALLEL PATHFINDER: Process ALL nets simultaneously - that's the whole point!
+        test_nets = nets  # Route ALL nets with parallel PathFinder - no artificial limits!
+        logger.info(f"TRUE PARALLEL PATHFINDER: Processing ALL {len(test_nets)} nets simultaneously")
+        
+        # DEBUG: Show actual net names being processed
+        net_names = [net.name for net in test_nets][:10]  # First 10 net names
+        logger.info(f"NET BATCH DEBUG: Processing nets: {net_names}")
         
         # Process nets individually with on-demand tap generation
         results = {}
         
         if self.use_gpu_rrg and self.gpu_pathfinder:
-            logger.info(f"GPU PathFinder routing {len(test_nets)} nets with on-demand tap generation")
+            logger.info(f"TRUE PARALLEL GPU PathFinder routing {len(test_nets)} nets simultaneously")
+            
+            # PHASE 1: Collect all nets and generate taps for ALL nets at once
+            all_net_requests = []
+            valid_nets = []
             
             for net_idx, net in enumerate(test_nets):
-                logger.debug(f"Processing net {net.name} ({net_idx+1}/{len(test_nets)})")
+                logger.debug(f"Preparing net {net.name} ({net_idx+1}/{len(test_nets)})")
                 
-                # Generate tap candidates for this net only
+                # Generate tap candidates for this net
                 net_pads = [
                     {'name': pad.id, 'net': net.name, 'x': pad.position.x, 'y': pad.position.y,
                      'width': getattr(pad, 'width', 1.0), 'height': getattr(pad, 'height', 1.0)}
@@ -1291,34 +1292,43 @@ class ManhattanRRGRoutingEngine(RoutingEngine):
                 
                 try:
                     # Add temporary tap nodes for this net to GPU RRG
-                    logger.info(f"Generating taps for net {net.name} with {len(net_pads)} pads")
+                    logger.debug(f"Generating taps for net {net.name} with {len(net_pads)} pads")
                     tap_candidates = self.gpu_rrg.add_temporary_taps_for_net(net.name, net_pads)
                     
                     if not tap_candidates:
                         logger.error(f"No tap candidates generated for net {net.name}")
                         continue
-                    else:
-                        logger.info(f"Generated {len(tap_candidates)} tap candidates for net {net.name}")
+                    
+                    logger.debug(f"Generated {len(tap_candidates)} tap candidates for net {net.name}")
                     
                     # Create route requests for this net
                     net_requests = self._create_route_requests(net)
                     
                     if net_requests:
-                        # Route this net
-                        net_results = self.gpu_pathfinder.route_all_nets(net_requests)
-                        results.update(net_results)
-                    
-                    # Remove temporary tap nodes to free memory
-                    self.gpu_rrg.remove_temporary_taps()
+                        all_net_requests.extend(net_requests)
+                        valid_nets.append(net)
                     
                 except Exception as e:
-                    logger.error(f"Error processing net {net.name}: {e}")
-                    # Ensure cleanup even on error
-                    try:
-                        self.gpu_rrg.remove_temporary_taps()
-                    except:
-                        pass
+                    logger.error(f"Error preparing net {net.name}: {e}")
                     continue
+            
+            # PHASE 2: Route ALL nets simultaneously using true parallel PathFinder
+            if all_net_requests:
+                logger.info(f"PARALLEL PATHFINDER: Routing {len(all_net_requests)} requests for {len(valid_nets)} nets simultaneously")
+                logger.info(f"CONNECTIVITY TEST: About to call PathFinder with tap connectivity fix!")
+                try:
+                    results = self.gpu_pathfinder.route_all_nets_parallel(all_net_requests)
+                    logger.info(f"CONNECTIVITY TEST: PathFinder completed, checking results...")
+                except Exception as e:
+                    logger.error(f"Parallel PathFinder routing failed: {e}")
+                    results = {}
+            
+            # PHASE 3: Clean up all temporary taps at once
+            try:
+                self.gpu_rrg.remove_temporary_taps()
+                logger.debug("Cleaned up all temporary tap nodes")
+            except Exception as e:
+                logger.warning(f"Error cleaning up temporary taps: {e}")
                     
         elif self.pathfinder_router:
             logger.info(f"Legacy PathFinder routing (no on-demand tap generation)")

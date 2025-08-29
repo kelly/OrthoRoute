@@ -38,6 +38,7 @@ from PyQt6.QtGui import (
 )
 
 from .kicad_colors import KiCadColorScheme
+from .pathfinder_stats_widget import PathFinderStatsWidget
 from ...algorithms.manhattan.manhattan_router_rrg import ManhattanRRGRoutingEngine
 from ...algorithms.manhattan.rrg import RoutingConfig
 from ...infrastructure.gpu.cuda_provider import CUDAProvider
@@ -1022,14 +1023,9 @@ class OrthoRouteMainWindow(QMainWindow):
         
         layout.addWidget(board_info_group)
         
-        # Routing statistics group
-        routing_stats_group = QGroupBox("Routing Statistics")
-        routing_stats_layout = QVBoxLayout(routing_stats_group)
-        
-        self.routing_stats_label = QLabel("No routing performed")
-        routing_stats_layout.addWidget(self.routing_stats_label)
-        
-        layout.addWidget(routing_stats_group)
+        # PathFinder Live Statistics Widget
+        self.pathfinder_stats = PathFinderStatsWidget()
+        layout.addWidget(self.pathfinder_stats)
         
         # Add stretch to push everything to top
         layout.addStretch()
@@ -1331,6 +1327,9 @@ class OrthoRouteMainWindow(QMainWindow):
         try:
             logger.info("Starting Manhattan routing with live updates...")
             
+            # Reset and prepare statistics widget
+            self.pathfinder_stats.reset()
+            
             # Create routing configuration matching RRG PathFinder parameters
             config = RoutingConfig(
                 grid_pitch=0.4,
@@ -1348,8 +1347,21 @@ class OrthoRouteMainWindow(QMainWindow):
                 alpha=2.0
             )
             
+            # Calculate total nets for statistics
+            nets = self.board_data.get('nets', [])
+            if isinstance(nets, list) and len(nets) > 0 and isinstance(nets[0], dict):
+                total_nets = len([net for net in nets if len(net.get('pads', [])) >= 2])
+            else:
+                # Fallback: use airwires count as total nets approximation
+                total_nets = len(self.board_data.get('airwires', []))
+            self.pathfinder_stats.start_routing(total_nets, config.max_iterations)
+            
             # Initialize progressive routing state
             self._setup_progressive_routing(config)
+            
+            # Set up progress callback for live statistics
+            if hasattr(self.router, 'gpu_pathfinder') and hasattr(self.router.gpu_pathfinder, 'parallel_pathfinder'):
+                self.router.gpu_pathfinder.parallel_pathfinder.progress_callback = self._on_pathfinder_progress
             
         except Exception as e:
             logger.exception("Error starting Manhattan routing")
@@ -1614,6 +1626,50 @@ class OrthoRouteMainWindow(QMainWindow):
         routed_nets = result.get('routed_nets', 0)
         failed_nets = result.get('failed_nets', 0)
         self.status_label.setText(f"Manhattan routing completed: {routed_nets} nets routed")
+    
+    def _on_pathfinder_progress(self, progress_data):
+        """Handle PathFinder routing progress updates"""
+        if not hasattr(self, 'pathfinder_stats') or not self.pathfinder_stats:
+            return
+            
+        progress_type = progress_data.get('type', '')
+        
+        if progress_type == 'iteration_start':
+            # Update iteration progress
+            iteration = progress_data.get('iteration', 0)
+            max_iterations = progress_data.get('max_iterations', 50)
+            status = progress_data.get('status', '')
+            self.pathfinder_stats.update_iteration(iteration, max_iterations, status)
+            
+        elif progress_type == 'routing_update':
+            # Update routing statistics
+            successful = progress_data.get('successful_routes', 0)
+            failed = progress_data.get('failed_routes', 0)
+            self.pathfinder_stats.update_routing_stats(successful, failed)
+            
+            # Update congestion statistics
+            congested_edges = progress_data.get('congested_edges', 0)
+            total_edges = progress_data.get('total_edges', 1)
+            self.pathfinder_stats.update_congestion(congested_edges, total_edges)
+            
+        elif progress_type == 'convergence':
+            # PathFinder converged
+            iteration = progress_data.get('iteration', 0)
+            status = progress_data.get('status', 'Converged!')
+            max_iterations = 50  # Default, will be updated by iteration_start
+            self.pathfinder_stats.update_iteration(iteration, max_iterations, status)
+            
+        elif progress_type == 'completion':
+            # Routing completed
+            successful = progress_data.get('successful_routes', 0)
+            total = progress_data.get('total_routes', 0)
+            converged = progress_data.get('converged', False)
+            
+            final_message = f"Completed: {successful}/{total} routes"
+            if converged:
+                final_message += " (Converged)"
+                
+            self.pathfinder_stats.finish_routing(successful > 0, final_message)
         
         # Clean up GPU resources if they were used
         try:
@@ -1623,16 +1679,6 @@ class OrthoRouteMainWindow(QMainWindow):
                     self.routing_thread.router.gpu_provider.cleanup()
         except Exception as e:
             logger.warning(f"Error cleaning up GPU resources: {e}")
-        
-        logger.info(f"SUCCESS: Manhattan routing successful: {routed_nets}/{routed_nets + failed_nets} nets")
-        
-        # Update routing statistics
-        stats = result.get('stats', {})
-        stats_text = f"Routed: {routed_nets} nets\n"
-        stats_text += f"Failed: {failed_nets} nets\n"
-        stats_text += f"Time: {stats.get('elapsed_time', 0):.2f}s\n"
-        stats_text += f"Grid: {stats.get('grid_size', (0,0,0))[0]}×{stats.get('grid_size', (0,0,0))[1]}"
-        self.routing_stats_label.setText(stats_text)
     
     def _on_routing_error(self, error_message):
         """Handle routing errors"""
