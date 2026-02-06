@@ -499,12 +499,58 @@ from collections import defaultdict
 
 # Third-party
 import numpy as np
+
+# ============================================================================
+# GPU BACKEND DETECTION (CuPy for CUDA, MLX for Apple Silicon)
+# ============================================================================
+CUPY_AVAILABLE = False
+MLX_AVAILABLE = False
+GPU_AVAILABLE = False
+
+# Try CuPy (NVIDIA CUDA)
 try:
     import cupy as cp
+    _test = cp.array([1, 2, 3])
+    _ = cp.sum(_test)
     CUPY_AVAILABLE = True
-except ImportError:
-    cp = np  # Fallback to numpy if cupy not available
-    CUPY_AVAILABLE = False
+    GPU_AVAILABLE = True
+    del _test
+except (ImportError, Exception):
+    cp = None
+
+# Try MLX (Apple Silicon Metal)
+try:
+    import mlx.core as mx
+    _test = mx.array([1, 2, 3])
+    _ = mx.sum(_test)
+    mx.eval(_)
+    MLX_AVAILABLE = True
+    GPU_AVAILABLE = True
+    del _test
+except (ImportError, Exception):
+    mx = None
+
+# Set up the array module (xp pattern) based on best available backend
+if CUPY_AVAILABLE:
+    xp = cp
+    BACKEND = 'cupy'
+elif MLX_AVAILABLE:
+    xp = mx
+    BACKEND = 'mlx'
+    # Create cp as numpy alias for backward compatibility when MLX is used
+    # (CuPy-specific code paths will use CPU fallback)
+    cp = np
+else:
+    xp = np
+    cp = np  # Alias for backward compatibility
+    BACKEND = 'numpy'
+
+# CUPY_GPU_AVAILABLE: True ONLY when CuPy is available (for CuPy-specific code paths)
+# Use this instead of GPU_AVAILABLE when the code uses CuPy-specific features like:
+# - cp.cuda.Event(), cp.cuda.Stream()
+# - cupyx.scipy.sparse
+# - cp.RawKernel
+CUPY_GPU_AVAILABLE = CUPY_AVAILABLE
 
 # Local config
 from .pathfinder.config import PAD_CLEARANCE_MM
@@ -513,25 +559,36 @@ from .board_analyzer import analyze_board_characteristics, BoardCharacteristics
 from .parameter_derivation import derive_routing_parameters, apply_derived_parameters, DerivedRoutingParameters
 from .pathfinder.via_kernels import ViaKernelManager, convert_via_metadata_to_gpu, ensure_gpu_array
 
-# Optional GPU
-try:
-    import cupy as cp
-    GPU_AVAILABLE = True
-except ImportError:
-    cp = None
-    GPU_AVAILABLE = False
-
 # Local imports
 from ...domain.models.board import Board
 from .pathfinder.kicad_geometry import KiCadGeometry
 
-# GPU pathfinding
+# GPU pathfinding - supports CuPy (CUDA), MLX (Metal), and NumPy (CPU)
+CUDA_DIJKSTRA_AVAILABLE = False
+PORTABLE_DIJKSTRA_AVAILABLE = False
+
+# Try original CUDA Dijkstra first (best performance on NVIDIA)
+if CUPY_AVAILABLE:
+    try:
+        from .pathfinder.cuda_dijkstra import CUDADijkstra
+        CUDA_DIJKSTRA_AVAILABLE = True
+    except ImportError:
+        CUDADijkstra = None
+
+# Try portable Dijkstra (works on all backends)
 try:
-    from .pathfinder.cuda_dijkstra import CUDADijkstra
-    CUDA_DIJKSTRA_AVAILABLE = True
+    from .pathfinder.portable_dijkstra import (
+        PortableDijkstra,
+        PortableDijkstraBatch,
+        create_dijkstra_solver,
+        get_best_backend as get_dijkstra_backend,
+    )
+    PORTABLE_DIJKSTRA_AVAILABLE = True
 except ImportError:
-    CUDADijkstra = None
-    CUDA_DIJKSTRA_AVAILABLE = False
+    PortableDijkstra = None
+    PortableDijkstraBatch = None
+    create_dijkstra_solver = None
+    get_dijkstra_backend = None
 
 logger = logging.getLogger(__name__)
 
@@ -648,7 +705,8 @@ class CSRGraph:
     """Compressed Sparse Row graph"""
 
     def __init__(self, use_gpu=False, edge_capacity=None):
-        self.use_gpu = use_gpu and GPU_AVAILABLE
+        # Only use GPU if CuPy is available (MLX doesn't support CSR sparse matrices)
+        self.use_gpu = use_gpu and CUPY_AVAILABLE
         self.xp = cp if self.use_gpu else np
         self.indptr = None
         self.indices = None
@@ -697,7 +755,8 @@ class CSRGraph:
         sort_start = time.time()
 
         # OPTIMIZATION: Use GPU sort if available (8-10× faster for large arrays)
-        if self.use_gpu and GPU_AVAILABLE:
+        # NOTE: Only use CuPy for GPU sort - MLX doesn't have structured array support
+        if self.use_gpu and CUPY_GPU_AVAILABLE:
             try:
                 logger.info(f"[GPU-SORT] Using CuPy GPU radix sort (expected ~3-5s for 54M edges)")
                 # Extract 'src' field as contiguous array (CuPy doesn't support structured arrays)
@@ -774,7 +833,8 @@ class CSRGraph:
             self.edge_layer = None
             self.edge_kind = None
 
-        if self.use_gpu:
+        if self.use_gpu and CUPY_GPU_AVAILABLE:
+            # CuPy GPU path
             self.indptr = cp.asarray(indptr)
             self.indices = cp.asarray(indices)
             self.base_costs = cp.asarray(costs)
@@ -784,6 +844,7 @@ class CSRGraph:
             if self.edge_kind is not None:
                 self.edge_kind_gpu = cp.asarray(self.edge_kind)
         else:
+            # CPU path (also used for MLX which doesn't support CSR directly)
             self.indptr = indptr
             self.indices = indices
             self.base_costs = costs
@@ -801,7 +862,8 @@ class EdgeAccountant:
 
     def __init__(self, num_edges: int, use_gpu=False):
         self.E = num_edges
-        self.use_gpu = use_gpu and GPU_AVAILABLE
+        # For EdgeAccountant, we need CuPy for true GPU arrays with .get() method
+        self.use_gpu = use_gpu and CUPY_GPU_AVAILABLE
         self.xp = cp if self.use_gpu else np
 
         self.canonical: Dict[int, int] = {}
@@ -846,8 +908,9 @@ class EdgeAccountant:
             (total_overuse_sum, edge_overuse_count)
         """
         # Edge overuse (existing)
-        usage = self.present.get() if self.use_gpu else self.present
-        cap = self.capacity.get() if self.use_gpu else self.capacity
+        # .get() is CuPy-specific - use hasattr check for cross-platform compatibility
+        usage = self.present.get() if hasattr(self.present, 'get') else np.asarray(self.present)
+        cap = self.capacity.get() if hasattr(self.capacity, 'get') else np.asarray(self.capacity)
         edge_over = np.maximum(0, usage - cap)
         edge_over_sum = int(edge_over.sum())
         edge_over_count = int((edge_over > 0).sum())
@@ -862,9 +925,11 @@ class EdgeAccountant:
                 via_col_over = np.maximum(0, router_instance.via_col_use - router_instance.via_col_cap)
                 via_col_over_sum = int(via_col_over.sum())
 
-            # Check via segment overuse
-            if hasattr(router_instance, 'via_seg_use') and hasattr(router_instance, 'via_seg_cap'):
-                via_seg_over = np.maximum(0, router_instance.via_seg_use - router_instance.via_seg_cap)
+            # Check via segment overuse (None for 2-layer boards)
+            seg_use = getattr(router_instance, 'via_seg_use', None)
+            seg_cap = getattr(router_instance, 'via_seg_cap', None)
+            if seg_use is not None and seg_cap is not None:
+                via_seg_over = np.maximum(0, seg_use - seg_cap)
                 via_seg_over_sum = int(via_seg_over.sum())
 
         total_over = edge_over_sum + via_col_over_sum + via_seg_over_sum
@@ -882,12 +947,13 @@ class EdgeAccountant:
             if 0 <= idx < self.E:
                 recomputed[idx] = float(count)
 
-        if self.use_gpu:
+        if self.use_gpu and CUPY_GPU_AVAILABLE:
             present_cpu = self.present.get()
             recomputed_cpu = recomputed.get()
         else:
-            present_cpu = self.present
-            recomputed_cpu = recomputed
+            # CPU or MLX path - convert to numpy if needed
+            present_cpu = np.asarray(self.present) if hasattr(self.present, '__array__') else self.present
+            recomputed_cpu = np.asarray(recomputed) if hasattr(recomputed, '__array__') else recomputed
 
         mismatch = np.sum(np.abs(present_cpu - recomputed_cpu))
         if mismatch > 0.01:
@@ -999,16 +1065,16 @@ class EdgeAccountant:
         # Only apply to horizontal/vertical edges (edge_kind==0), not vias (edge_kind==1)
         per_edge_bias = 1.0
         if (edge_layer is not None) and (layer_bias_per_layer is not None) and (edge_kind is not None):
-            if self.use_gpu:
-                # Ensure arrays are on GPU
+            if self.use_gpu and CUPY_GPU_AVAILABLE:
+                # Ensure arrays are on GPU (CuPy)
                 layer_bias = cp.asarray(layer_bias_per_layer) if not hasattr(layer_bias_per_layer, "get") else layer_bias_per_layer
                 edge_layer_arr = cp.asarray(edge_layer) if not hasattr(edge_layer, "get") else edge_layer
                 edge_kind_arr = cp.asarray(edge_kind) if not hasattr(edge_kind, "get") else edge_kind
             else:
-                # NumPy arrays
-                layer_bias = layer_bias_per_layer
-                edge_layer_arr = edge_layer
-                edge_kind_arr = edge_kind
+                # NumPy/MLX arrays
+                layer_bias = np.asarray(layer_bias_per_layer) if hasattr(layer_bias_per_layer, '__array__') else layer_bias_per_layer
+                edge_layer_arr = np.asarray(edge_layer) if hasattr(edge_layer, '__array__') else edge_layer
+                edge_kind_arr = np.asarray(edge_kind) if hasattr(edge_kind, '__array__') else edge_kind
 
             # Gather bias for each edge's layer
             bias_factors = layer_bias[edge_layer_arr]
@@ -1133,9 +1199,18 @@ class Lattice3D:
         CRITICAL: Must include F.Cu (layer 0) → internal layer transitions!
         The escape planner creates stubs on F.Cu, and PathFinder must be able
         to create vias from F.Cu to whatever internal layer it chooses.
+
+        For 2-layer boards, we allow F.Cu (0) ↔ B.Cu (1) vias.
         """
         # Check config for via policy (default to FULL blind/buried)
         allow_any = True  # ALWAYS allow full blind/buried for convergence
+
+        # SPECIAL CASE: 2-layer boards
+        # Both F.Cu (0) and B.Cu (1) are routing layers, connected by vias
+        if layer_count == 2:
+            legal_pairs = {(0, 1), (1, 0)}  # F.Cu ↔ B.Cu
+            logger.info(f"[VIA-PAIRS] 2-layer board: allowing F.Cu ↔ B.Cu vias")
+            return legal_pairs
 
         # Internal routing layers (exclude B.Cu which is layer_count-1)
         routing_layers = list(range(1, layer_count - 1))
@@ -1195,8 +1270,16 @@ class Lattice3D:
         # Count edges to pre-allocate array (avoids MemoryError with 30M edges)
         edge_count = 0
 
-        # Count H/V edges (exclude outer layers 0 and self.layers-1)
-        for z in range(1, self.layers - 1):
+        # Determine which layers get lateral edges
+        # For 2-layer boards: both layers get lateral edges (F.Cu=0, B.Cu=1)
+        # For multi-layer boards: only internal layers (1 to layers-2) get lateral edges
+        if self.layers == 2:
+            lateral_layers = [0, 1]  # Both F.Cu and B.Cu for 2-layer boards
+        else:
+            lateral_layers = list(range(1, self.layers - 1))  # Internal layers only
+
+        # Count H/V edges for lateral layers
+        for z in lateral_layers:
             if self.layer_dir[z] == 'h':
                 edge_count += 2 * self.y_steps * (self.x_steps - 1)
             else:  # 'v'
@@ -1210,8 +1293,8 @@ class Lattice3D:
         logger.info(f"Pre-allocating for {edge_count:,} edges ({via_edge_count:,} via edges for {len(legal_via_pairs_set)} pairs)")
         graph = CSRGraph(use_gpu, edge_capacity=edge_count)
 
-        # Build lateral edges (H/V discipline, exclude outer layers 0 and self.layers-1)
-        for z in range(1, self.layers - 1):
+        # Build lateral edges (H/V discipline)
+        for z in lateral_layers:
             direction = self.layer_dir[z]
 
             if direction == 'h':
@@ -1384,9 +1467,15 @@ class ROIExtractor:
         min_y = int(max(0, min_y - corridor_buffer))
         max_y = int(min(self.lattice.y_steps - 1, max_y + corridor_buffer))
 
-        # Add layer margin (clamp to inner layers only - exclude outer layers 0 and layers-1)
-        min_z = max(1, min_z - layer_margin)
-        max_z = min(self.lattice.layers - 2, max_z + layer_margin)
+        # Add layer margin (clamp to routing layers)
+        # For 2-layer boards: allow both layers 0 and 1
+        # For 4+ layer boards: only internal layers 1 to layers-2
+        if self.lattice.layers == 2:
+            min_z = max(0, min_z - layer_margin)
+            max_z = min(1, max_z + layer_margin)
+        else:
+            min_z = max(1, min_z - layer_margin)
+            max_z = min(self.lattice.layers - 2, max_z + layer_margin)
 
         # Generate L-shaped corridor using SET for O(1) deduplication
         x_steps = self.lattice.x_steps
@@ -2128,16 +2217,16 @@ class PathFinderRouter:
         self.layer_bias = np.ones(Nz, dtype=np.float32)  # Index by z (0..Nz-1), 1.0 = neutral
         logger.info(f"[LAYER-BALANCE] Initialized for {Nz} layers")
 
-        # Determine if we should use GPU for via arrays
-        use_via_gpu = self.config.use_gpu and GPU_AVAILABLE
+        # Determine if we should use GPU for via arrays (CuPy only - MLX doesn't support these ops yet)
+        use_via_gpu = self.config.use_gpu and CUPY_GPU_AVAILABLE
 
         if getattr(self.config, "via_column_pooling", True):
-            # Create arrays on GPU if available, CPU otherwise
+            # Create arrays on GPU if CuPy available, CPU otherwise
             if use_via_gpu:
                 self.via_col_cap = cp.full((Nx, Ny), int(getattr(self.config, "via_column_capacity", 4)), dtype=cp.int16)
                 self.via_col_use = cp.zeros((Nx, Ny), dtype=cp.int16)
                 self.via_col_pres = cp.zeros((Nx, Ny), dtype=cp.float32)
-                logger.info(f"[VIA-POOL] Column pooling enabled (GPU): capacity={int(self.via_col_cap[0,0])} per (x,y)")
+                logger.info(f"[VIA-POOL] Column pooling enabled (CuPy GPU): capacity={int(self.via_col_cap[0,0])} per (x,y)")
             else:
                 self.via_col_cap = np.full((Nx, Ny), int(getattr(self.config, "via_column_capacity", 4)), dtype=np.int16)
                 self.via_col_use = np.zeros((Nx, Ny), dtype=np.int16)
@@ -2146,8 +2235,16 @@ class PathFinderRouter:
 
         if getattr(self.config, "via_segment_pooling", True):
             # Segments between routing layers (1..Nz-2): segment z→z+1 stored at index z-1
-            self._segZ = Nz - 2  # Number of routing layers
-            if use_via_gpu:
+            # For 2-layer boards, there are no internal segments (Nz - 2 = 0)
+            self._segZ = max(1, Nz - 2)  # At least 1 to avoid empty arrays
+            if Nz <= 2:
+                # 2-layer board: no via segment pooling needed
+                self.via_seg_cap = None
+                self.via_seg_use = None
+                self.via_seg_pres = None
+                self.via_seg_prefix = None
+                logger.info(f"[VIA-POOL] Segment pooling skipped for {Nz}-layer board (no internal segments)")
+            elif use_via_gpu:
                 self.via_seg_cap = cp.full((Nx, Ny, self._segZ), int(getattr(self.config, "via_segment_capacity", 2)), dtype=cp.int8)
                 self.via_seg_use = cp.zeros((Nx, Ny, self._segZ), dtype=cp.int16)
                 self.via_seg_pres = cp.zeros((Nx, Ny, self._segZ), dtype=cp.float32)
@@ -2174,11 +2271,11 @@ class PathFinderRouter:
 
         self.solver = SimpleDijkstra(self.graph, self.lattice)
 
-        # Add GPU solver if available
-        use_gpu_solver = self.config.use_gpu and GPU_AVAILABLE and CUDA_DIJKSTRA_AVAILABLE
+        # Add GPU solver if available (requires CuPy for CUDA Dijkstra)
+        use_gpu_solver = self.config.use_gpu and CUPY_GPU_AVAILABLE and CUDA_DIJKSTRA_AVAILABLE
 
         # Enhanced debug logging
-        logger.info(f"[GPU-INIT] config.use_gpu={self.config.use_gpu}, GPU_AVAILABLE={GPU_AVAILABLE}, CUDA_DIJKSTRA_AVAILABLE={CUDA_DIJKSTRA_AVAILABLE}")
+        logger.info(f"[GPU-INIT] config.use_gpu={self.config.use_gpu}, CUPY_GPU_AVAILABLE={CUPY_GPU_AVAILABLE}, MLX_AVAILABLE={MLX_AVAILABLE}, CUDA_DIJKSTRA_AVAILABLE={CUDA_DIJKSTRA_AVAILABLE}")
         logger.info(f"[GPU-INIT] use_gpu_solver={use_gpu_solver}")
 
         if use_gpu_solver:
@@ -2198,12 +2295,16 @@ class PathFinderRouter:
             reasons = []
             if not self.config.use_gpu:
                 reasons.append("config.use_gpu=False")
-            if not GPU_AVAILABLE:
-                reasons.append("CuPy not installed")
+            if not CUPY_GPU_AVAILABLE:
+                if MLX_AVAILABLE:
+                    reasons.append("Using MLX backend (CUDA Dijkstra requires CuPy)")
+                else:
+                    reasons.append("CuPy not installed")
             if not CUDA_DIJKSTRA_AVAILABLE:
                 reasons.append("CUDADijkstra import failed")
-            logger.info(f"[GPU] CPU-only mode: {', '.join(reasons)}")
-        self.roi_extractor = ROIExtractor(self.graph, use_gpu=self.config.use_gpu and GPU_AVAILABLE, lattice=self.lattice)
+            logger.info(f"[GPU] CPU solver mode: {', '.join(reasons)}")
+        # ROIExtractor uses graph.xp for array operations, which is already set correctly
+        self.roi_extractor = ROIExtractor(self.graph, use_gpu=self.config.use_gpu and CUPY_GPU_AVAILABLE, lattice=self.lattice)
 
         # Identify via edges for via-specific accounting
         self._identify_via_edges()
@@ -2621,7 +2722,10 @@ class PathFinderRouter:
         Accumulate via column and segment usage for a committed path.
         Also registers via keepouts to prevent other nets from routing tracks through via locations.
         """
-        if not hasattr(self, 'via_col_use') and not hasattr(self, 'via_seg_use'):
+        col_pool = hasattr(self, 'via_col_use') and self.via_col_use is not None
+        seg_pool = hasattr(self, 'via_seg_use') and self.via_seg_use is not None
+
+        if not col_pool and not seg_pool:
             return  # Pooling not enabled
 
         # Ensure via_keepouts_map exists
@@ -2629,8 +2733,6 @@ class PathFinderRouter:
             self._via_keepouts_map = {}
 
         idx_to_coord = self.lattice.idx_to_coord
-        col_pool = hasattr(self, 'via_col_use')
-        seg_pool = hasattr(self, 'via_seg_use')
 
         for u, v in zip(node_path, node_path[1:]):
             xu, yu, zu = idx_to_coord(u)
@@ -2666,13 +2768,16 @@ class PathFinderRouter:
 
     def _rebuild_via_usage_from_committed(self):
         """Rebuild via column/segment usage from all currently committed net paths"""
-        if not hasattr(self, 'via_col_use') and not hasattr(self, 'via_seg_use'):
+        has_col = hasattr(self, 'via_col_use') and self.via_col_use is not None
+        has_seg = hasattr(self, 'via_seg_use') and self.via_seg_use is not None
+
+        if not has_col and not has_seg:
             return
 
         # Clear counters
-        if hasattr(self, 'via_col_use'):
+        if has_col:
             self.via_col_use.fill(0)
-        if hasattr(self, 'via_seg_use'):
+        if has_seg:
             self.via_seg_use.fill(0)
 
         # Clear routing via keepouts but PRESERVE portal keepouts
@@ -2888,7 +2993,7 @@ class PathFinderRouter:
 
         return bitmap
 
-    def _filter_roi_by_ownership(self, roi_nodes: np.ndarray, current_net: str) -> np.ndarray:
+    def _filter_roi_by_ownership(self, roi_nodes: np.ndarray, current_net: str, force_allow_nodes: np.ndarray = None) -> np.ndarray:
         """
         Filter ROI nodes to exclude nodes owned by OTHER nets (owner-aware).
 
@@ -2898,6 +3003,8 @@ class PathFinderRouter:
         Args:
             roi_nodes: Array of node indices in ROI
             current_net: Net currently being routed
+            force_allow_nodes: Optional array of node indices that must ALWAYS be included
+                               (e.g., src/dst nodes for the current net)
 
         Returns:
             Filtered roi_nodes array (nodes owned by other nets removed)
@@ -2915,6 +3022,16 @@ class PathFinderRouter:
         filtered_roi = roi_nodes[keep_mask]
         blocked = len(roi_nodes) - len(filtered_roi)
 
+        # Force-allow specific nodes (e.g., src/dst) even if owned by other nets
+        if force_allow_nodes is not None and len(force_allow_nodes) > 0:
+            # Add force_allow_nodes that are not already in filtered_roi
+            force_set = set(force_allow_nodes)
+            filtered_set = set(filtered_roi)
+            missing = np.array([n for n in force_set if n not in filtered_set], dtype=np.int32)
+            if len(missing) > 0:
+                filtered_roi = np.concatenate([filtered_roi, missing])
+                logger.debug(f"[NODE-OWNER] Net {current_net}: force-added {len(missing)} required nodes (src/dst)")
+
         if blocked > 0:
             logger.debug(f"[NODE-OWNER] Net {current_net}: filtered {blocked:,}/{len(roi_nodes):,} ROI nodes owned by other nets")
 
@@ -2930,7 +3047,10 @@ class PathFinderRouter:
         if not hasattr(self, '_escape_vias') or not self._escape_vias:
             return
 
-        if not hasattr(self, 'via_col_use') and not hasattr(self, 'via_seg_use'):
+        col_pool = hasattr(self, 'via_col_use') and self.via_col_use is not None
+        seg_pool = hasattr(self, 'via_seg_use') and self.via_seg_use is not None
+
+        if not col_pool and not seg_pool:
             # Via spatial tracking not enabled
             return
 
@@ -2963,11 +3083,11 @@ class PathFinderRouter:
                 z_lo, z_hi = z_hi, z_lo
 
             # Track in column usage
-            if hasattr(self, 'via_col_use'):
+            if col_pool:
                 self.via_col_use[xu, yu] += 1
 
             # Track in segment usage
-            if hasattr(self, 'via_seg_use'):
+            if seg_pool:
                 for z in range(z_lo, z_hi):
                     seg_idx = z - 1  # Segments indexed from 0
                     if 0 <= seg_idx < self._segZ:
@@ -3185,7 +3305,10 @@ class PathFinderRouter:
         import time
         t0 = time.perf_counter()
 
-        if not hasattr(self, 'via_col_pres') and not hasattr(self, 'via_seg_pres'):
+        col_pres = getattr(self, 'via_col_pres', None)
+        seg_pres = getattr(self, 'via_seg_pres', None)
+
+        if col_pres is None and seg_pres is None:
             return
 
         # Check if metadata is available
@@ -3198,11 +3321,11 @@ class PathFinderRouter:
         if hasattr(self, 'via_kernel_manager') and self.via_kernel_manager.use_gpu:
             try:
                 # Check if there are any penalties to apply (GPU can check this fast)
-                xp = cp if hasattr(self.via_col_pres, 'device') else np
-                if hasattr(self, 'via_col_pres'):
-                    col_max = float(xp.max(self.via_col_pres))
-                    if col_max == 0 and hasattr(self, 'via_seg_pres'):
-                        seg_max = float(xp.max(self.via_seg_pres))
+                xp = cp if (col_pres is not None and hasattr(col_pres, 'device')) else np
+                if col_pres is not None:
+                    col_max = float(xp.max(col_pres))
+                    if col_max == 0 and seg_pres is not None:
+                        seg_max = float(xp.max(seg_pres))
                         if seg_max == 0:
                             return  # No penalties needed
 
@@ -3211,8 +3334,8 @@ class PathFinderRouter:
 
                 penalty_count = self.via_kernel_manager.apply_via_penalties(
                     via_metadata=self._via_edge_metadata,
-                    via_col_pres_gpu=self.via_col_pres,
-                    via_seg_pres_gpu=self.via_seg_pres if hasattr(self, 'via_seg_pres') else None,
+                    via_col_pres_gpu=col_pres,
+                    via_seg_pres_gpu=seg_pres,
                     col_weight=col_weight * pres_fac,
                     seg_weight=seg_weight * pres_fac,
                     total_cost_gpu=self.accounting.total_cost,
@@ -3394,7 +3517,12 @@ class PathFinderRouter:
             logger.warning("[HARD-BLOCK] No via edge metadata, skipping")
             return
 
-        if not hasattr(self, 'via_col_use') and not hasattr(self, 'via_seg_use'):
+        col_use = getattr(self, 'via_col_use', None)
+        col_cap = getattr(self, 'via_col_cap', None)
+        seg_use = getattr(self, 'via_seg_use', None)
+        seg_cap = getattr(self, 'via_seg_cap', None)
+
+        if col_use is None and seg_use is None:
             # No via spatial tracking enabled
             return
 
@@ -3403,10 +3531,10 @@ class PathFinderRouter:
             try:
                 blocked_count = self.via_kernel_manager.hard_block_via_edges(
                     via_metadata=self._via_edge_metadata,
-                    via_col_use_gpu=self.via_col_use,
-                    via_col_cap_gpu=self.via_col_cap,
-                    via_seg_use_gpu=self.via_seg_use if hasattr(self, 'via_seg_use') else None,
-                    via_seg_cap_gpu=self.via_seg_cap if hasattr(self, 'via_seg_cap') else None,
+                    via_col_use_gpu=col_use,
+                    via_col_cap_gpu=col_cap,
+                    via_seg_use_gpu=seg_use,
+                    via_seg_cap_gpu=seg_cap,
                     total_cost_gpu=self.accounting.total_cost,
                     Ny=self._Ny,
                     segZ=self._segZ if hasattr(self, '_segZ') else 0
@@ -3439,11 +3567,15 @@ class PathFinderRouter:
         else:
             total_cost_cpu = total_cost
 
-        # Get via arrays (convert from GPU if needed)
-        via_col_use = self.via_col_use.get() if hasattr(self.via_col_use, 'get') else self.via_col_use
-        via_col_cap = self.via_col_cap.get() if hasattr(self.via_col_cap, 'get') else self.via_col_cap
-        via_seg_use = self.via_seg_use.get() if hasattr(self, 'via_seg_use') and hasattr(self.via_seg_use, 'get') else getattr(self, 'via_seg_use', None)
-        via_seg_cap = self.via_seg_cap.get() if hasattr(self, 'via_seg_cap') and hasattr(self.via_seg_cap, 'get') else getattr(self, 'via_seg_cap', None)
+        # Get via arrays (convert from GPU if needed, handle None for 2-layer boards)
+        _col_use = getattr(self, 'via_col_use', None)
+        _col_cap = getattr(self, 'via_col_cap', None)
+        via_col_use = _col_use.get() if (_col_use is not None and hasattr(_col_use, 'get')) else _col_use
+        via_col_cap = _col_cap.get() if (_col_cap is not None and hasattr(_col_cap, 'get')) else _col_cap
+        _seg_use = getattr(self, 'via_seg_use', None)
+        _seg_cap = getattr(self, 'via_seg_cap', None)
+        via_seg_use = _seg_use.get() if (_seg_use is not None and hasattr(_seg_use, 'get')) else _seg_use
+        via_seg_cap = _seg_cap.get() if (_seg_cap is not None and hasattr(_seg_cap, 'get')) else _seg_cap
 
         blocked_count = 0
 
@@ -3500,7 +3632,8 @@ class PathFinderRouter:
 
         # Load params into local variables with defaults (ensures new config values used)
         # Scale parameters by layer count for self-tuning
-        n_sig_layers = self._Nz - 2  # Exclude F.Cu and B.Cu (layers 0 and Nz-1)
+        # For 2-layer boards, both F.Cu and B.Cu are signal layers
+        n_sig_layers = max(2, self._Nz - 2)  # Minimum 2 for 2-layer boards
 
         # Base parameters from config
         pres_fac = float(getattr(cfg, 'pres_fac_init', 1.0))
@@ -3561,11 +3694,11 @@ class PathFinderRouter:
             alpha = float(getattr(cfg, "via_present_alpha", 0.6))
             beta = float(getattr(cfg, "via_present_beta", 0.4))
 
-            if hasattr(self, 'via_col_use'):
+            if hasattr(self, 'via_col_use') and self.via_col_use is not None:
                 over = np.maximum(0, self.via_col_use - self.via_col_cap).astype(np.float32)
                 self.via_col_pres = alpha * over + beta * self.via_col_pres
 
-            if hasattr(self, 'via_seg_use'):
+            if hasattr(self, 'via_seg_use') and self.via_seg_use is not None:
                 over = np.maximum(0, self.via_seg_use - self.via_seg_cap).astype(np.float32)
                 self.via_seg_pres = alpha * over + beta * self.via_seg_pres
                 # Build cumulative prefix along z axis for fast range queries
@@ -3853,19 +3986,21 @@ class PathFinderRouter:
 
             # Instrumentation: Via pooling statistics
             # OPTIMIZATION: Reduced frequency to every 10 iterations (0.5-1s speedup)
-            if it % 10 == 0 and (hasattr(self, 'via_col_use') or hasattr(self, 'via_seg_use')):
-                if hasattr(self, 'via_col_use'):
-                    cols_used = np.sum(self.via_col_use > 0)
-                    cols_over = np.sum(self.via_col_use > self.via_col_cap)
-                    max_col_use = int(np.max(self.via_col_use))
+            col_use = getattr(self, 'via_col_use', None)
+            seg_use = getattr(self, 'via_seg_use', None)
+            if it % 10 == 0 and (col_use is not None or seg_use is not None):
+                if col_use is not None:
+                    cols_used = np.sum(col_use > 0)
+                    cols_over = np.sum(col_use > self.via_col_cap)
+                    max_col_use = int(np.max(col_use))
                     max_col_pres = float(np.max(self.via_col_pres))
                     mean_col_pres = float(np.mean(self.via_col_pres[self.via_col_pres > 0])) if np.any(self.via_col_pres > 0) else 0.0
                     logger.info(f"[VIA-POOL] Columns: used={cols_used}, over_cap={cols_over}, max_use={max_col_use}, max_pres={max_col_pres:.2f}, mean_pres={mean_col_pres:.2f}")
 
-                if hasattr(self, 'via_seg_use'):
-                    segs_used = np.sum(self.via_seg_use > 0)
-                    segs_over = np.sum(self.via_seg_use > self.via_seg_cap)
-                    max_seg_use = int(np.max(self.via_seg_use))
+                if seg_use is not None:
+                    segs_used = np.sum(seg_use > 0)
+                    segs_over = np.sum(seg_use > self.via_seg_cap)
+                    max_seg_use = int(np.max(seg_use))
                     max_seg_pres = float(np.max(self.via_seg_pres))
                     max_seg_prefix = float(np.max(self.via_seg_prefix))
                     logger.info(f"[VIA-POOL] Segments: used={segs_used}, over_cap={segs_over}, max_use={max_seg_use}, max_pres={max_seg_pres:.2f}, max_prefix={max_seg_prefix:.2f}")
@@ -3893,7 +4028,8 @@ class PathFinderRouter:
 
                     # Target bias (1.0 = neutral, <1.0 = cheaper, >1.0 = more expensive)
                     # Scale alpha by layer count: fewer layers need stronger balancing
-                    n_sig_layers = self._Nz - 2  # Exclude F.Cu and B.Cu
+                    # For 2-layer boards, both F.Cu and B.Cu are signal layers
+                    n_sig_layers = max(2, self._Nz - 2)
                     if n_sig_layers <= 12:
                         alpha = 0.20  # Strong balancing for sparse stacks
                         bias_min, bias_max = 0.60, 1.80
@@ -4236,8 +4372,8 @@ class PathFinderRouter:
         """
         logger.info("[DETAIL] Extracting conflict subgraph...")
 
-        present = self.accounting.present.get() if self.accounting.use_gpu else self.accounting.present
-        cap = self.accounting.capacity.get() if self.accounting.use_gpu else self.accounting.capacity
+        present = self.accounting.present.get() if hasattr(self.accounting.present, 'get') else np.asarray(self.accounting.present)
+        cap = self.accounting.capacity.get() if hasattr(self.accounting.capacity, 'get') else np.asarray(self.accounting.capacity)
         over = np.maximum(0, present - cap)
 
         # Find overused edges and their neighborhoods (radius ~5-10 edges)
@@ -4330,8 +4466,8 @@ class PathFinderRouter:
         Route hardest first. Apply slight shuffle each iteration.
         """
         import random
-        present = self.accounting.present.get() if self.accounting.use_gpu else self.accounting.present
-        cap = self.accounting.capacity.get() if self.accounting.use_gpu else self.accounting.capacity
+        present = self.accounting.present.get() if hasattr(self.accounting.present, 'get') else np.asarray(self.accounting.present)
+        cap = self.accounting.capacity.get() if hasattr(self.accounting.capacity, 'get') else np.asarray(self.accounting.capacity)
         over = np.maximum(0, present - cap)
 
         scores = []
@@ -4588,6 +4724,13 @@ class PathFinderRouter:
             portal_setup_start = time.time()
             nodes_to_add = []
 
+            # CRITICAL: Always add src and dst nodes to ROI first!
+            # These are the raw pad positions and MUST be in ROI for fallback routing
+            if global_to_roi[src] < 0:
+                nodes_to_add.append(src)
+            if global_to_roi[dst] < 0:
+                nodes_to_add.append(dst)
+
             # Add portal seed nodes if they're not already in ROI
             if use_portals and src_seeds and dst_targets:
                 for global_node, _ in src_seeds:
@@ -4597,7 +4740,7 @@ class PathFinderRouter:
                     if global_to_roi[global_node] < 0:
                         nodes_to_add.append(global_node)
 
-            # Add missing portal nodes to ROI
+            # Add missing nodes to ROI
             if nodes_to_add:
                 roi_nodes = np.append(roi_nodes, nodes_to_add)
                 # Rebuild mapping to include new nodes
@@ -4606,7 +4749,9 @@ class PathFinderRouter:
 
             # OWNER-AWARE FILTERING: Remove nodes owned by OTHER nets
             # This prevents routing through via barrels - THE FIX for dangling vias!
-            roi_nodes = self._filter_roi_by_ownership(roi_nodes, net_id)
+            # CRITICAL: Force-allow src/dst nodes - they MUST be in ROI for routing to work
+            force_allow = np.array([src, dst], dtype=np.int32)
+            roi_nodes = self._filter_roi_by_ownership(roi_nodes, net_id, force_allow_nodes=force_allow)
             # Rebuild mapping after ownership filtering
             global_to_roi = np.full(len(costs), -1, dtype=np.int32)
             global_to_roi[roi_nodes] = np.arange(len(roi_nodes), dtype=np.int32)
@@ -4753,7 +4898,8 @@ class PathFinderRouter:
         per_layer_over = xp.bincount(edge_layer, weights=over, minlength=num_layers)
 
         # Normalize to create bias factors
-        maxv = float(per_layer_over.max().get() if accountant.use_gpu else per_layer_over.max())
+        max_val = per_layer_over.max()
+        maxv = float(max_val.get() if hasattr(max_val, 'get') else max_val)
         if maxv <= 1e-9:
             raw_bias = xp.ones(num_layers, dtype=xp.float32)
         else:
@@ -4910,9 +5056,9 @@ class PathFinderRouter:
         if ripped is None:
             ripped = set()
 
-        present = self.accounting.present.get() if self.accounting.use_gpu else self.accounting.present
-        cap = self.accounting.capacity.get() if self.accounting.use_gpu else self.accounting.capacity
-        hist = self.accounting.history.get() if self.accounting.use_gpu else self.accounting.history
+        present = self.accounting.present.get() if hasattr(self.accounting.present, 'get') else np.asarray(self.accounting.present)
+        cap = self.accounting.capacity.get() if hasattr(self.accounting.capacity, 'get') else np.asarray(self.accounting.capacity)
+        hist = self.accounting.history.get() if hasattr(self.accounting.history, 'get') else np.asarray(self.accounting.history)
 
         # Include history in hotset selection: edges are "hot" if they have present OR historical congestion
         over = np.maximum(0, present - cap)
@@ -5198,8 +5344,8 @@ class PathFinderRouter:
         Respect locked nets - don't rip unless they touch new overuse.
         Returns the set of ripped net IDs.
         """
-        present = self.accounting.present.get() if self.accounting.use_gpu else self.accounting.present
-        cap = self.accounting.capacity.get() if self.accounting.use_gpu else self.accounting.capacity
+        present = self.accounting.present.get() if hasattr(self.accounting.present, 'get') else np.asarray(self.accounting.present)
+        cap = self.accounting.capacity.get() if hasattr(self.accounting.capacity, 'get') else np.asarray(self.accounting.capacity)
         over = np.maximum(0, present - cap)
         over_idx = set(map(int, np.where(over > 0)[0]))
 
@@ -5329,22 +5475,28 @@ class PathFinderRouter:
         z_lo = np.minimum(zu, zv)
         z_hi = np.maximum(zu, zv)
 
-        # Clamp z values to valid routing layers (1..Nz-2)
-        z_lo = np.clip(z_lo, 1, self.lattice.layers - 2)
-        z_hi = np.clip(z_hi, 1, self.lattice.layers - 2)
+        # Clamp z values to valid routing layers
+        # For 2-layer boards: layers 0-1 are valid
+        # For 4+ layer boards: layers 1 to layers-2 are valid
+        if self.lattice.layers == 2:
+            z_lo = np.clip(z_lo, 0, 1)
+            z_hi = np.clip(z_hi, 0, 1)
+        else:
+            z_lo = np.clip(z_lo, 1, self.lattice.layers - 2)
+            z_hi = np.clip(z_hi, 1, self.lattice.layers - 2)
 
-        # Store metadata - on GPU if kernels available, CPU otherwise
-        use_via_gpu = self.config.use_gpu and GPU_AVAILABLE
+        # Store metadata - on GPU if CuPy kernels available, CPU otherwise
+        use_via_gpu = self.config.use_gpu and CUPY_GPU_AVAILABLE
 
         if use_via_gpu:
-            # Keep on GPU for zero-copy kernel execution
+            # Keep on GPU for zero-copy kernel execution (CuPy only)
             self._via_edge_metadata = {
                 'indices': cp.asarray(via_edge_indices.astype(np.int32)),
                 'xy_coords': cp.asarray(via_xy_coords),
                 'z_lo': cp.asarray(z_lo.astype(np.int32)),
                 'z_hi': cp.asarray(z_hi.astype(np.int32)),
             }
-            logger.info(f"[VIA-METADATA] Built metadata for {num_via_edges} via edges on GPU in {time.perf_counter() - t0:.3f}s")
+            logger.info(f"[VIA-METADATA] Built metadata for {num_via_edges} via edges on CuPy GPU in {time.perf_counter() - t0:.3f}s")
         else:
             # Keep on CPU
             self._via_edge_metadata = {
@@ -5662,8 +5814,9 @@ class PathFinderRouter:
                 x0, y0, z0 = self.lattice.idx_to_coord(prev)
                 x1, y1, z1 = self.lattice.idx_to_coord(node)
 
-                # Drop any planar segment on outer layers (shouldn't happen once graph/ROI are fixed)
-                if z0 == z1 and (z0 == 0 or z0 == self.lattice.layers - 1):
+                # Drop any planar segment on outer layers (only applies for 4+ layer boards)
+                # For 2-layer boards, both layers are valid routing layers
+                if self.lattice.layers > 2 and z0 == z1 and (z0 == 0 or z0 == self.lattice.layers - 1):
                     logger.error(f"[EMIT-GUARD] refusing planar segment on outer layer {z0} for net {net_id}")
                     prev = node
                     prev_layer = z1

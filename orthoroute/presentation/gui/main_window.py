@@ -1079,20 +1079,54 @@ class OrthoRouteMainWindow(QMainWindow):
         self.load_board_data()
         
     def detect_gpu_status(self):
-        """Detect GPU capabilities for algorithm selection"""
+        """Detect GPU capabilities for algorithm selection.
+
+        Supports multiple backends:
+        - NVIDIA CUDA (via CuPy)
+        - Apple Silicon Metal (via MLX)
+        """
+        gpu_backend = None
+
+        # Try MLX first (Apple Silicon)
         try:
-            # Try to detect CUDA/GPU availability
-            import subprocess
-            result = subprocess.run(['nvidia-smi'], capture_output=True, text=True, timeout=5)
-            if result.returncode == 0:
-                self.gpu_status = {'available': True, 'can_use_gpu_routing': True}
-                logger.info("GPU detected and available for routing")
-            else:
-                self.gpu_status = {'available': False, 'can_use_gpu_routing': False}
-                logger.info("GPU not available, using CPU routing")
-        except:
-            self.gpu_status = {'available': False, 'can_use_gpu_routing': False}
-            logger.info("GPU detection failed, using CPU routing")
+            import mlx.core as mx
+            _test = mx.array([1, 2, 3])
+            _ = mx.sum(_test)
+            mx.eval(_)
+            self.gpu_status = {
+                'available': True,
+                'can_use_gpu_routing': True,
+                'backend': 'MLX (Apple Silicon)'
+            }
+            gpu_backend = 'MLX'
+            logger.info("Apple Silicon GPU detected via MLX - GPU routing available")
+        except (ImportError, Exception):
+            pass
+
+        # Try CUDA if MLX not available
+        if gpu_backend is None:
+            try:
+                import cupy as cp
+                _test = cp.array([1, 2, 3])
+                _ = cp.sum(_test)
+                self.gpu_status = {
+                    'available': True,
+                    'can_use_gpu_routing': True,
+                    'backend': 'CUDA (NVIDIA)'
+                }
+                gpu_backend = 'CUDA'
+                logger.info("NVIDIA GPU detected via CuPy - GPU routing available")
+            except (ImportError, Exception):
+                pass
+
+        # Fallback to CPU
+        if gpu_backend is None:
+            self.gpu_status = {
+                'available': False,
+                'can_use_gpu_routing': False,
+                'backend': 'CPU'
+            }
+            logger.info("No GPU detected, using CPU routing")
         
     def setup_ui(self):
         """Setup the main UI layout - three panel design like original"""
@@ -1396,8 +1430,12 @@ class OrthoRouteMainWindow(QMainWindow):
         self.csv_status_label.setVisible(False) 
         status_bar.addWidget(self.csv_status_label)
         
-        # GPU status indicator
-        gpu_text = "GPU Available" if self.gpu_status.get('available') else "CPU Only"
+        # GPU status indicator - show backend type
+        if self.gpu_status.get('available'):
+            backend = self.gpu_status.get('backend', 'GPU')
+            gpu_text = f"{backend}"
+        else:
+            gpu_text = "CPU Only"
         status_bar.addPermanentWidget(QLabel(f"{gpu_text} | OrthoRoute v1.0"))
         
     def setup_menus(self):

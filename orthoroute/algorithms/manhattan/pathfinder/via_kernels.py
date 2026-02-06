@@ -1,28 +1,79 @@
 """
-Via Capacity CUDA Kernels - High-Performance Via Spatial Constraint Enforcement
+Via Capacity Kernels - High-Performance Via Spatial Constraint Enforcement
 
 This module provides GPU-accelerated kernels for enforcing via spatial constraints:
 1. Hard-blocking via edges at capacity (infinity cost)
 2. Applying via pooling penalties (congestion-based cost adjustments)
 
-Performance: ~30,000ms → <5ms (6000x speedup!)
+Supports multiple backends:
+- CuPy (NVIDIA CUDA) - Original CUDA kernels, fastest
+- MLX (Apple Silicon Metal) - Vectorized operations
+- NumPy (CPU fallback) - Pure Python implementation
+
+Performance: ~30,000ms → <5ms (6000x speedup!) with CUDA
 """
 
 import logging
 import time
-from typing import Optional, Dict, Tuple
+from typing import Any, Optional, Dict, Tuple
 import numpy as np
 
+# ============================================================================
+# BACKEND DETECTION
+# ============================================================================
+CUDA_AVAILABLE = False
+CUPY_AVAILABLE = False
+MLX_AVAILABLE = False
+GPU_AVAILABLE = False
+
+# Try CuPy (NVIDIA CUDA)
 try:
     import cupy as cp
+    _test = cp.array([1])
+    _ = cp.sum(_test)
+    CUPY_AVAILABLE = True
     CUDA_AVAILABLE = True
-except ImportError:
-    # Create dummy module for type hints when CuPy not available
-    import numpy as np
+    GPU_AVAILABLE = True
+    del _test
+except (ImportError, Exception):
+    cp = None
+
+# Try MLX (Apple Silicon)
+try:
+    import mlx.core as mx
+    _test = mx.array([1])
+    _ = mx.sum(_test)
+    mx.eval(_)
+    MLX_AVAILABLE = True
+    GPU_AVAILABLE = True
+    del _test
+except (ImportError, Exception):
+    mx = None
+
+# Set up array module (xp pattern) and type compatibility
+if CUPY_AVAILABLE:
+    xp = cp
+    BACKEND = 'cupy'
+    ArrayType = cp.ndarray
+elif MLX_AVAILABLE:
+    xp = mx
+    BACKEND = 'mlx'
+    ArrayType = Any  # MLX arrays don't have a simple type
+    # Create dummy cp module for backward compatibility
     class _DummyCuPy:
         ndarray = np.ndarray
     cp = _DummyCuPy()
-    CUDA_AVAILABLE = False
+else:
+    xp = np
+    BACKEND = 'numpy'
+    ArrayType = np.ndarray
+    # Create dummy cp module for backward compatibility
+    class _DummyCuPy:
+        ndarray = np.ndarray
+    cp = _DummyCuPy()
+
+# CUPY_GPU_AVAILABLE: True ONLY when CuPy is available (for CuPy-specific code paths)
+CUPY_GPU_AVAILABLE = CUPY_AVAILABLE
 
 logger = logging.getLogger(__name__)
 

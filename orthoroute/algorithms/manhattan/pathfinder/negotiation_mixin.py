@@ -3,6 +3,11 @@ Negotiation Mixin - Extracted from UnifiedPathFinder
 
 This module contains negotiation mixin functionality.
 Part of the PathFinder routing algorithm refactoring.
+
+Supports multiple backends:
+- CuPy (NVIDIA CUDA)
+- MLX (Apple Silicon Metal)
+- NumPy (CPU fallback)
 """
 
 import logging
@@ -10,12 +15,51 @@ import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 import numpy as np
 
+# ============================================================================
+# BACKEND DETECTION
+# ============================================================================
+CUPY_AVAILABLE = False
+MLX_AVAILABLE = False
+GPU_AVAILABLE = False
+
+# Try CuPy (NVIDIA CUDA)
 try:
     import cupy as cp
+    _test = cp.array([1])
+    _ = cp.sum(_test)
     CUPY_AVAILABLE = True
-except ImportError:
+    GPU_AVAILABLE = True
+    del _test
+except (ImportError, Exception):
     cp = None
-    CUPY_AVAILABLE = False
+
+# Try MLX (Apple Silicon)
+try:
+    import mlx.core as mx
+    _test = mx.array([1])
+    _ = mx.sum(_test)
+    mx.eval(_)
+    MLX_AVAILABLE = True
+    GPU_AVAILABLE = True
+    del _test
+except (ImportError, Exception):
+    mx = None
+
+# Set up array module (xp pattern)
+if CUPY_AVAILABLE:
+    xp = cp
+    BACKEND = 'cupy'
+elif MLX_AVAILABLE:
+    xp = mx
+    cp = np  # Alias for backward compatibility when MLX is used
+    BACKEND = 'mlx'
+else:
+    xp = np
+    cp = np  # Alias for backward compatibility
+    BACKEND = 'numpy'
+
+# CUPY_GPU_AVAILABLE: True ONLY when CuPy is available (for CuPy-specific code paths)
+CUPY_GPU_AVAILABLE = CUPY_AVAILABLE
 
 from types import SimpleNamespace
 
